@@ -9,15 +9,14 @@ import Control.Monad
 import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
 import Control.Concurrent.STM
 import qualified Control.Exception as E
--- (Exception, ErrorCall, throwIO, try, catch)
 import System.Log.Logger
 
 data Message = MsgDummy
              | MsgCrash
 
 data RouterMsg = Quit
-               | Crashed ThreadId
-               | Exited ThreadId 
+               | Crashed ThreadId E.SomeException
+               | Exited ThreadId
   deriving(Show)
 
 type CommandQueue = TChan RouterMsg 
@@ -72,7 +71,7 @@ handleCmd Quit s = do
   debug "Quitting manager thread"
   return Nothing
   
-handleCmd (Crashed tid) s = do
+handleCmd (Crashed tid _) s = do
   debug $ "Worker thread " ++ (show tid) ++ " crashed!"
   let workers = delete tid (stateWorkers s) 
   tid <- forkWorker (stateCmdQ s) (stateMsgQ s)
@@ -88,7 +87,7 @@ forkWorker cmdQ msgQ = do
     debug $ "Starting new router worker on: " ++ (show tid) 
     result <- tryWorkerThread cmdQ msgQ
     atomically $ 
-      writeTChan cmdQ $ either (const (Crashed tid)) (const (Exited tid)) result
+      writeTChan cmdQ $ either (Crashed tid) (const (Exited tid)) result
 
 tryWorkerThread :: CommandQueue -> MessageQueue -> IO (Either E.SomeException ())
 tryWorkerThread qCtrl qMsg = do
