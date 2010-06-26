@@ -25,8 +25,8 @@ main = withSocketsDo $ do
   
   debug "Entering main"
   r <- newRouter 4
-  mgr <- newConnectionManager 
-  l <- startlistener (newConnection mgr r) 4321  
+  mgr <- newConnectionManager r
+  l <- startlistener (newConnection mgr) 4321  
   mainloop State { stateRouter = r, stateManager = mgr, stateListeners = [l] }
   
 mainloop :: State -> IO ()
@@ -42,8 +42,8 @@ mainloop s = do
     _   -> mainloop s
     -}
     
-newConnection :: ConnectionManager -> Router -> Socket -> IO ()
-newConnection mgr r s = do
+newConnection :: ConnectionManager -> Socket -> IO ()
+newConnection mgr s = do
   debug "new connection" -- conn <- newConnection s
   createConnection mgr s
   return ()

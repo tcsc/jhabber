@@ -4,6 +4,9 @@ all:
 run: all
 	./bin/jhabber
 
+debug: all
+	ghci Main
+
 clean:
 	rm obj/*.o
 	rm bin/*
