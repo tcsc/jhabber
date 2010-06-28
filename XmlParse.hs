@@ -7,6 +7,7 @@ module XmlParse ( XmlElement(XmlElement,XmlText),
                   xmlFormatElement,
                   xmlFormatElements,
                   xmlFormatShortElement,
+                  xmlGetAttribute,
                   xmlProcessingInstruction,
                   xmlNestedTag,
                   xmlNestedTags,
@@ -31,9 +32,13 @@ data XmlAttribute = XmlAttribute { attrNamespace :: String,
                                    attrValue :: String }
   deriving (Show, Eq)
 
--- | Get an attribute value
---getAttribute :: String -> XmlElement -> Maybe String
---getAttribute name (Element _ attributes _) = lookup name attributes 
+xmlGetAttribute :: String -> String -> XmlElement -> Maybe String
+xmlGetAttribute nameSpace name (XmlElement _ _ attributes _) = do
+  attrib <- find (\(XmlAttribute ns n _) ->ns == nameSpace && n == name) attributes
+  return $ attrValue attrib
+
+xmlGetChild :: (XmlElement -> Bool) -> XmlElement -> Maybe XmlElement
+xmlGetChild test element = find test $ children element 
 
 xmlFormatElements :: Bool -> [XmlElement] -> String
 xmlFormatElements short elems = (concat $ map (xmlFormatElement short) elems)
