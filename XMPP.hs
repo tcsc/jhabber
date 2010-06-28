@@ -43,18 +43,21 @@ xmppRxStreamStart rx sId =
 xmppParseStanza :: Parser XmlElement
 xmppParseStanza = xmlNestedTag
 
+{-| Takes an XMPP message and formats it as an XML element -}
 xmppXml :: XmppStanza -> XmlElement
 xmppXml (Features fs) = XmlElement "stream" "features" [] fs
 xmppXml (AuthChallenge c) = XmlElement "" "challenge"
   [XmlAttribute "" "xmlns" saslNamespace] 
   [XmlText $ (encode . unpack . fromString) c]
-  
+
+{-| Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8 encoded XML -}  
 xmppFormat :: XmppStanza -> ByteString
 xmppFormat (RxStreamOpen host connId) = 
   fromString $ xmlFormatShortElement $ xmppRxStreamStart host connId
 xmppFormat stanza = 
   fromString $ xmlFormatElement False $ xmppXml stanza
   
+{-| Parses an XML stanza into a (possible) XMPP message -}
 xmppFromXml :: XmlElement -> Maybe XmppStanza
 xmppFromXml element@(XmlElement "" "auth" attribs children) = do 
   ns <- xmlGetAttribute "" "xmlns" element
