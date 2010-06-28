@@ -88,7 +88,11 @@ runReader q s = do
     readLoop queue socket buffer = do
       rval <- readConnection socket buffer xmppParseStanza 
       case rval of 
-        Just xml -> do 
+        Just xml -> do
+          case xmppFromXml xml of
+            Just stanza -> do
+              atomically $ writeTChan q (InboundXmpp stanza) 
+            Nothing  -> return ()
           readLoop queue socket buffer
         
         Nothing -> do
@@ -101,6 +105,16 @@ handleMessage StreamStartRx state = do
   xmppSend s $ RxStreamOpen "localhost" (idNumber state)
   xmppSend s $ xmppFeatures
   return (Just state)
+
+handleMessage (InboundXmpp (AuthMechanism m)) state = do
+  debug $ "received authentication selection request: " ++ m
+  case m of 
+    "DIGEST-MD5" -> do
+      let s = socket state
+      xmppSend s $ AuthChallenge (digestChallenge "jhabber" "n0nc3!")
+      return (Just state)
+    _ -> return Nothing
+    
 handleMessage m s = return (Just s)
 
 {-|
@@ -132,6 +146,14 @@ readConnection s bufferRef parser = do
             _ -> do -- faility fail-fail
               debug $ "Parse failure: " ++ (show e)
               return Nothing
+              
+digestChallenge :: String -> String -> String
+digestChallenge r n =
+  "realm=\"" ++ r ++ "\"," ++ 
+  "nonce=\"" ++ n ++ "\"," ++ 
+  "qop=\"auth\"," ++ 
+  "charset=\"utf-8\"," ++
+  "algorithm=\"md5-sess\""
 
 {-|
  Formats an XMPP stanza and sends it out on the socket
