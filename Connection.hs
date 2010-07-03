@@ -19,6 +19,7 @@ import Text.ParserCombinators.Parsec(Parser, parse)
 import Text.ParserCombinators.Parsec.Error
 
 import LocalRouter
+import Sasl
 import XmlParse
 import XMPP
 
@@ -28,6 +29,7 @@ data ConnMsg = StreamStartRx
              | ConnectionLost
              | ProtocolError
              | Close
+             deriving (Show)
 
 type ConnMsgQ = TChan ConnMsg
 
@@ -39,7 +41,8 @@ data ConnectionState = State { idNumber :: Integer,
                                socket :: Socket,
                                router :: Router,
                                onLostCB :: Callback,
-                               msgQ :: ConnMsgQ }  
+                               msgQ :: ConnMsgQ,
+                               authInfo :: AuthInfo }  
   
 {- ------------------------------------------------------------------------- -}
 
@@ -51,7 +54,8 @@ startConnection r cId s onLost = do
                       socket = s,
                       router = r,
                       msgQ = q, 
-                      onLostCB = onLost }
+                      onLostCB = onLost,
+                      authInfo = None }
   forkIO $ runConnection state
   return c
   
@@ -108,14 +112,41 @@ handleMessage StreamStartRx state = do
 
 handleMessage (InboundXmpp (AuthMechanism m)) state = do
   debug $ "received authentication selection request: " ++ m
-  case m of 
-    "DIGEST-MD5" -> do
-      let s = socket state
-      xmppSend s $ AuthChallenge (digestChallenge "jhabber" "n0nc3!")
+  auth <- newAuthInfo m "jhabber"
+  case auth of
+    Just a ->  do 
+      xmppSend (socket state) $ AuthChallenge (challenge a)
+      let state' = state { authInfo = a }
+      return $ Just state'
+    Nothing -> do
+      -- unsupported authentication mechanism. Bail.
+      return Nothing
+
+handleMessage (InboundXmpp (AuthResponse r)) state = do
+  debug $ "received authentication response"
+  case checkResponse (authInfo state) r of 
+    Just authInfo' -> do
+      let uid = getUid authInfo'
+      
+      -- TODO: lookup this user's *actual* password here
+      let pwd = "pwd"
+      
+      if checkCredentials authInfo' uid pwd
+        then do
+          let state' = state { authInfo = authInfo' }
+          return (Just state')
+        else do
+          authFailure state "temporary-auth-failure"
+          return (Just state)
+          
+    Nothing -> do
+      authFailure state "temporary-auth-failure" 
       return (Just state)
-    _ -> return Nothing
-    
+
 handleMessage m s = return (Just s)
+
+authFailure :: ConnectionState -> String -> IO ()
+authFailure state reason = xmppSend (socket state)  $ xmppNewAuthFailure reason
 
 {-|
  Reads an element from the connection and returns it to the caller
@@ -146,14 +177,6 @@ readConnection s bufferRef parser = do
             _ -> do -- faility fail-fail
               debug $ "Parse failure: " ++ (show e)
               return Nothing
-              
-digestChallenge :: String -> String -> String
-digestChallenge r n =
-  "realm=\"" ++ r ++ "\"," ++ 
-  "nonce=\"" ++ n ++ "\"," ++ 
-  "qop=\"auth\"," ++ 
-  "charset=\"utf-8\"," ++
-  "algorithm=\"md5-sess\""
 
 {-|
  Formats an XMPP stanza and sends it out on the socket
