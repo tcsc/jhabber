@@ -7,7 +7,9 @@ module XmlParse ( XmlElement(XmlElement,XmlText),
                   xmlFormatElement,
                   xmlFormatElements,
                   xmlFormatShortElement,
+                  xmlNewElement,
                   xmlGetAttribute,
+                  xmlGetChild,
                   xmlProcessingInstruction,
                   xmlNestedTag,
                   xmlNestedTags,
@@ -20,10 +22,10 @@ import Text.ParserCombinators.Parsec.Char
 import Text.ParserCombinators.Parsec.Error
 import Data.List
 
-data XmlElement = XmlElement { elemNamespace :: String,
-                               elemName :: String,
-                               attributes :: [XmlAttribute],
-                               children :: [XmlElement] }
+data XmlElement = XmlElement { elemNamespace :: !String,
+                               elemName :: !String,
+                               attributes :: ![XmlAttribute],
+                               children :: ![XmlElement] }
                 | XmlText String
                 deriving (Show, Eq)
                 
@@ -32,13 +34,20 @@ data XmlAttribute = XmlAttribute { attrNamespace :: String,
                                    attrValue :: String }
   deriving (Show, Eq)
 
+xmlNewElement :: String -> XmlElement
+xmlNewElement n = XmlElement "" n [] []
+
 xmlGetAttribute :: String -> String -> XmlElement -> Maybe String
 xmlGetAttribute nameSpace name (XmlElement _ _ attributes _) = do
   attrib <- find (\(XmlAttribute ns n _) ->ns == nameSpace && n == name) attributes
   return $ attrValue attrib
 
-xmlGetChild :: (XmlElement -> Bool) -> XmlElement -> Maybe XmlElement
-xmlGetChild test element = find test $ children element 
+xmlGetChild :: XmlElement -> Int -> Maybe XmlElement
+xmlGetChild e@(XmlElement _ _ _ children) n = 
+  if (length children) > n then
+    Just $ children !! n
+  else 
+    Nothing
 
 xmlFormatElements :: Bool -> [XmlElement] -> String
 xmlFormatElements short elems = (concat $ map (xmlFormatElement short) elems)
