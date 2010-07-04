@@ -93,6 +93,7 @@ runReader q s = do
       rval <- readConnection socket buffer xmppParseStanza 
       case rval of 
         Just xml -> do
+          -- debug $ "xml: " ++ (show xml) ++ "\n"
           case xmppFromXml xml of
             Just stanza -> do
               atomically $ writeTChan q (InboundXmpp stanza) 
@@ -123,27 +124,44 @@ handleMessage (InboundXmpp (AuthMechanism m)) state = do
       return Nothing
 
 handleMessage (InboundXmpp (AuthResponse r)) state = do
-  debug $ "received authentication response"
+  debug $ "received authentication response " ++ (show $ authInfo state)
   case checkResponse (authInfo state) r of 
-    Just authInfo' -> do
-      let uid = getUid authInfo'
-      
-      -- TODO: lookup this user's *actual* password here
-      let pwd = "pwd"
-      
-      if checkCredentials authInfo' uid pwd
-        then do
-          let state' = state { authInfo = authInfo' }
-          return (Just state')
-        else do
-          authFailure state "temporary-auth-failure"
-          return (Just state)
+    Just (authInfo', rval) ->
+      generateResponse state authInfo' rval
           
     Nothing -> do
       authFailure state "temporary-auth-failure" 
-      return (Just state)
+      return Nothing
 
 handleMessage m s = return (Just s)
+
+generateResponse :: ConnectionState -> AuthInfo -> AuthResponse -> IO (Maybe ConnectionState)
+generateResponse state auth response = do
+  debug $ "auth: " ++ (show response)
+  case response of
+    NeedsAuthentication -> 
+      authenticate state auth
+    Challenge s -> do 
+      xmppSend (socket state) $ AuthChallenge s 
+      return $ Just state { authInfo = auth } 
+    Success -> do
+      xmppSend (socket state) $ AuthSuccess
+      return $ Just state { authInfo = auth }
+
+authenticate :: ConnectionState -> AuthInfo -> IO (Maybe ConnectionState)
+authenticate state authInfo = do
+  -- TODO: lookup this user's *actual* password here
+  let pwd = "pwd"
+  let uid = getUid authInfo
+
+  case checkCredentials authInfo uid pwd of
+    Just (authInfo', Challenge rval) -> do
+      xmppSend (socket state) $ AuthChallenge rval
+      return (Just $ state { authInfo = authInfo' } )
+      
+    Nothing -> do
+      authFailure state "temporary-auth-failure"
+      return Nothing
 
 authFailure :: ConnectionState -> String -> IO ()
 authFailure state reason = xmppSend (socket state)  $ xmppNewAuthFailure reason

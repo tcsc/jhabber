@@ -1,4 +1,5 @@
-module Sasl ( AuthInfo(None), 
+module Sasl ( AuthInfo(None),
+              AuthResponse(..),
               newAuthInfo, 
               challenge,
               checkResponse,
@@ -27,6 +28,17 @@ import System.IO.Unsafe
 
 import TextUtils
 
+data DigestState = Uninitialised
+                 | Unauthenticated
+                 | Pending
+                 | Authenticated
+                 deriving (Show)
+
+data AuthResponse = NeedsAuthentication
+                  | Challenge String
+                  | Success
+                  deriving (Show)
+
 data AuthInfo = None
               | Basic String 
               | Digest { digRealm :: !String,
@@ -37,7 +49,8 @@ data AuthInfo = None
                          digUri :: !String,
                          digNonceCount :: !String,
                          digQop :: !String,
-                         digAuthZId :: !String }
+                         digAuthZId :: !String,
+                         digState :: !DigestState }
               deriving (Show)
 
 saslNamespace :: String
@@ -51,10 +64,10 @@ newAuthInfo "DIGEST-MD5" realm = do
 newAuthInfo _ _ = return Nothing
 
 newDigest :: String -> String -> AuthInfo
-newDigest realm nonce = Digest realm nonce "" "" "" "" "" "" ""
+newDigest realm nonce = Digest realm nonce "" "" "" "" "" "" "" Uninitialised
   
 challenge :: AuthInfo -> String
-challenge (Digest realm nonce _ _ _ _ _ _ _) = 
+challenge (Digest realm nonce _ _ _ _ _ _ _ _) = 
   "realm=\"" ++ realm ++ "\"," ++ 
   "nonce=\"" ++ nonce ++ "\"," ++ 
   "qop=\"auth\"," ++ 
@@ -66,8 +79,29 @@ challenge (Digest realm nonce _ _ _ _ _ _ _) =
   definition of "Failure" in this case also includes  having the values in the
   parsed response not match up to the expected values in the AuthInfo block
  -}  
-checkResponse :: AuthInfo -> String -> Maybe AuthInfo
-checkResponse auth@(Digest _ _ _ _ _ _ _ _ _) r = do
+checkResponse :: AuthInfo -> String -> Maybe (AuthInfo, AuthResponse)
+checkResponse auth@(Digest _ _ _ _ _ _ _ _ _ state) r = do
+  case state of
+    Uninitialised -> digestStage1 auth r
+    Pending -> digestStage2 auth
+    _ -> Nothing 
+      
+checkCredentials :: AuthInfo -> String -> String -> Maybe (AuthInfo, AuthResponse)
+checkCredentials auth@(Digest _ _ _ _ _ _ _ _ _ _) uid pwd =
+  let clientDigest = Utf8.fromString $ digResponse auth
+      localDigest = calcDigest auth uid pwd
+      response = genResponse auth uid pwd
+  in if clientDigest == localDigest 
+    then let auth' = auth { digState = Pending }
+             ch = "rspauth=" ++ (Utf8.toString response)
+    in return (auth', Challenge ch)
+  else 
+    Nothing
+  
+checkCredentials a uid pwd = Nothing
+
+digestStage1 :: AuthInfo -> String -> Maybe (AuthInfo, AuthResponse)
+digestStage1 auth@(Digest _ _ _ _ _ _ _ _ _ _) r = do  
   pairs <- parsePairs r
   nonce <- lookup "nonce" pairs
   realm <- lookup "realm" pairs
@@ -81,21 +115,30 @@ checkResponse auth@(Digest _ _ _ _ _ _ _ _ _) r = do
       nc <- lookup "nc" pairs
       qop <- lookup "qop" pairs
       let authzid = fromMaybe "" $ lookup "authzid" pairs 
-      return auth { digUid = uid,
-                    digCNonce = clientNonce,
-                    digResponse = response,
-                    digNonceCount = nc,
-                    digAuthZId = authzid,
-                    digUri = uri,
-                    digQop = qop }
+      let auth' = auth { digUid = uid,
+                         digCNonce = clientNonce,
+                         digResponse = response,
+                         digNonceCount = nc,
+                         digAuthZId = authzid,
+                         digUri = uri,
+                         digQop = qop,
+                         digState = Unauthenticated }
+      return (auth', NeedsAuthentication)
+                    
+digestStage2 :: AuthInfo -> Maybe (AuthInfo, AuthResponse)
+digestStage2 auth = do
+  let auth' = auth { digState = Authenticated } 
+  return (auth', Success)
 
-checkCredentials :: AuthInfo -> String -> String -> Bool
-checkCredentials auth@(Digest _ _ _ _ _ _ _ _ _) uid pwd =
-  let clientDigest = Utf8.fromString $ digResponse auth
-      localDigest = calcDigest auth uid pwd
-  in clientDigest == localDigest    
-  
-checkCredentials a uid pwd = False
+{-
+needsAuthentication :: AuthInfo -> Bool
+needsAuthentication auth@(Digest _ _ _ _ _ _ _ _ _ state) =
+  case state of 
+    Unauthenticated -> True
+    _ -> False
+
+needsAuthentication authInfo = False
+-}    
 
 {-
 Let { a, b, ... } be the concatenation of the octet strings a, b, ...
@@ -154,15 +197,20 @@ where
   
 -}
 
+genResponse :: AuthInfo -> String -> String -> BS.ByteString
+genResponse auth@(Digest _ _ _ _ _ _ _ _ _ _) uid pwd = 
+  let text = digestText auth uid pwd ""
+  in hexl . hash $ text
+
 calcDigest :: AuthInfo -> String -> String -> BS.ByteString
-calcDigest auth@(Digest _ _ _ _ _ _ _ _ _) uid pwd = 
-  let text = digestText auth uid pwd
+calcDigest auth@(Digest _ _ _ _ _ _ _ _ _ _) uid pwd = 
+  let text = digestText auth uid pwd "AUTHENTICATE"
   in hexl . hash $ text
         
-digestText :: AuthInfo -> String -> String -> BS.ByteString
-digestText auth@(Digest realm nonce _ cnonce _ uri ncCount qop authzid) uid pwd = 
+digestText :: AuthInfo -> String -> String -> String -> BS.ByteString
+digestText auth@(Digest realm nonce _ cnonce _ uri ncCount qop authzid _) uid pwd n = 
   let a1 = digestPartA1 realm uid pwd nonce cnonce authzid
-      a2 = digestPartA2 uri
+      a2 = digestPartA2 n uri
       mid = Utf8.fromString $ intercalate ":" [nonce, ncCount, cnonce, qop]
   in BS.intercalate ((BS.singleton . c2w) ':') [a1, mid, a2]
   
@@ -178,8 +226,8 @@ digestPartA1B nonce cnonce authzid =
                       then [nonce, cnonce]
                       else [nonce, cnonce, authzid]
 
-digestPartA2 :: String -> BS.ByteString
-digestPartA2 uri = hexl . hashL . LazyUtf8.fromString $ "AUTHENTICATE:" ++ uri
+digestPartA2 :: String -> String -> BS.ByteString
+digestPartA2 n uri = hexl . hashL . LazyUtf8.fromString $ intercalate ":" [n, uri]
                       
 digestSecret :: String -> String -> String -> BS.ByteString
 digestSecret realm uid pwd = hashS $ intercalate ":" [uid, realm, pwd]
@@ -197,7 +245,7 @@ hashS :: String -> BS.ByteString
 hashS = hashL . LazyUtf8.fromString
 
 getUid :: AuthInfo -> String
-getUid auth@(Digest _ _ uid _ _ _ _ _ _) = uid
+getUid auth@(Digest _ _ uid _ _ _ _ _ _ _) = uid
 
 parsePairs :: String -> Maybe [(String, String)]
 parsePairs s = case parse pairs "" s of
