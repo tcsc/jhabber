@@ -19,6 +19,7 @@ data XmppStanza = RxStreamOpen String Integer
                 | AuthMechanism String
                 | AuthChallenge String
                 | AuthResponse String
+                | AuthSuccess
                 | Failure String XmlElement
                 deriving (Show)
 
@@ -60,6 +61,8 @@ xmppToXml (AuthChallenge c) = XmlElement "" "challenge"
   [XmlAttribute "" "xmlns" saslNamespace] 
   [XmlText $ (encode . unpack . fromString) c]
 
+xmppToXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" saslNamespace] []
+
 xmppToXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
 
@@ -72,12 +75,13 @@ xmppFromXml element@(XmlElement "" "auth" attribs children) = do
   
 xmppFromXml element@(XmlElement "" "response" attribs children) = do 
   ns <- xmlGetAttribute "" "xmlns" element
-  child <- xmlGetChild element 0
-  case child of
-    XmlText s -> do 
+  let mchild = xmlGetChild element 0
+  case mchild of
+    Just (XmlText s) -> do
       bytes <- decode s
       return $ AuthResponse (toString $ pack bytes)
-    _ -> Nothing
+    
+    Nothing -> return $ AuthResponse ""
       
 xmppFromXml element = Nothing
   
