@@ -102,6 +102,36 @@ runReader q s = do
         
         Nothing -> do
           atomically $ writeTChan q ProtocolError
+
+{-|
+ Reads an element from the connection and returns it to the caller
+ -}
+readConnection :: Socket -> IORef String -> Parser a -> IO (Maybe a)
+readConnection s bufferRef parser = do
+  buffer <- readIORef bufferRef
+  input <- (liftM toString) $ SBS.recv s 1024
+
+  case length input of
+    0 -> do -- closed connection
+      debug "Connection looks like its closed"
+      return Nothing
+
+    _ -> do
+      case parse (xmlGetRemainder . xmlTrim $ parser) "" (buffer ++ input) of
+        Right (result, remainder) -> do
+          writeIORef bufferRef remainder
+          return (Just result)
+
+        Left e -> do
+          case head (errorMessages e) of
+            SysUnExpect [] -> do
+              debug "Unexpected end-of-input"
+              writeIORef bufferRef (buffer ++ input)
+              readConnection s bufferRef parser
+
+            _ -> do -- faility fail-fail
+              debug $ "Parse failure: " ++ (show e)
+              return Nothing
           
 handleMessage :: ConnMsg -> ConnectionState -> IO (Maybe ConnectionState)
 handleMessage StreamStartRx state = do
@@ -165,36 +195,6 @@ authenticate state authInfo = do
 
 authFailure :: ConnectionState -> String -> IO ()
 authFailure state reason = xmppSend (socket state)  $ xmppNewAuthFailure reason
-
-{-|
- Reads an element from the connection and returns it to the caller
- -}
-readConnection :: Socket -> IORef String -> Parser a -> IO (Maybe a)
-readConnection s bufferRef parser = do
-  buffer <- readIORef bufferRef
-  input <- (liftM toString) $ SBS.recv s 1024
-
-  case length input of
-    0 -> do -- closed connection
-      debug "Connection looks like its closed"
-      return Nothing
-
-    _ -> do
-      case parse (xmlGetRemainder . xmlTrim $ parser) "" (buffer ++ input) of
-        Right (result, remainder) -> do
-          writeIORef bufferRef remainder
-          return (Just result)
-
-        Left e -> do
-          case head (errorMessages e) of
-            SysUnExpect [] -> do
-              debug "Unexpected end-of-input"
-              writeIORef bufferRef (buffer ++ input)
-              readConnection s bufferRef parser
-
-            _ -> do -- faility fail-fail
-              debug $ "Parse failure: " ++ (show e)
-              return Nothing
 
 {-|
  Formats an XMPP stanza and sends it out on the socket
