@@ -1,12 +1,14 @@
 module Sasl ( AuthInfo(None),
               AuthResponse(..),
+              AuthResult,
               newAuthInfo, 
               challenge,
               checkResponse,
               checkCredentials,
               getUid,
               saslNamespace ) where
-  
+
+import Control.Monad.Error  
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LazyBS
 import qualified Data.ByteString.UTF8 as Utf8
@@ -27,6 +29,7 @@ import System.Log.Logger(debugM)
 import System.IO.Unsafe
 
 import TextUtils
+--import EitherM
 
 data DigestState = Uninitialised
                  | Unauthenticated
@@ -37,7 +40,7 @@ data DigestState = Uninitialised
 data AuthResponse = NeedsAuthentication
                   | Challenge String
                   | Success
-                  deriving (Show)
+                  deriving (Show, Eq)
 
 data AuthInfo = None
               | Basic String 
@@ -52,6 +55,18 @@ data AuthInfo = None
                          digAuthZId :: !String,
                          digState :: !DigestState }
               deriving (Show)
+              
+data AuthFailure = UnsupportedMechanism
+                 | ProtocolFailure
+                 | Mismatch
+                 | Unexpected
+                 
+instance Error AuthFailure where
+  noMsg    = strMsg ""
+  strMsg _ = noMsg
+
+
+type AuthResult = Either AuthFailure
 
 saslNamespace :: String
 saslNamespace = "urn:ietf:params:xml:ns:xmpp-sasl"
@@ -79,14 +94,15 @@ challenge (Digest realm nonce _ _ _ _ _ _ _ _) =
   definition of "Failure" in this case also includes  having the values in the
   parsed response not match up to the expected values in the AuthInfo block
  -}  
-checkResponse :: AuthInfo -> String -> Maybe (AuthInfo, AuthResponse)
+checkResponse :: AuthInfo -> String -> AuthResult (AuthInfo, AuthResponse)
 checkResponse auth@(Digest _ _ _ _ _ _ _ _ _ state) r = do
   case state of
     Uninitialised -> digestStage1 auth r
     Pending -> digestStage2 auth
-    _ -> Nothing 
-      
-checkCredentials :: AuthInfo -> String -> String -> Maybe (AuthInfo, AuthResponse)
+    _ -> Left Unexpected 
+checkResponse authInfo r = Left UnsupportedMechanism
+
+checkCredentials :: AuthInfo -> String -> String -> AuthResult (AuthInfo, AuthResponse)
 checkCredentials auth@(Digest _ _ _ _ _ _ _ _ _ _) uid pwd =
   let clientDigest = Utf8.fromString $ digResponse auth
       localDigest = calcDigest auth uid pwd
@@ -94,27 +110,32 @@ checkCredentials auth@(Digest _ _ _ _ _ _ _ _ _ _) uid pwd =
   in if clientDigest == localDigest 
     then let auth' = auth { digState = Pending }
              ch = "rspauth=" ++ (Utf8.toString response)
-    in return (auth', Challenge ch)
+    in Right (auth', Challenge ch)
   else 
-    Nothing
+    Left Mismatch
   
-checkCredentials a uid pwd = Nothing
+checkCredentials a uid pwd = Left UnsupportedMechanism
 
-digestStage1 :: AuthInfo -> String -> Maybe (AuthInfo, AuthResponse)
+lookupItem :: String -> [(String,String)] -> AuthResult String
+lookupItem n ps = case lookup n ps of
+  Just v -> Right v
+  Nothing -> Left ProtocolFailure
+
+digestStage1 :: AuthInfo -> String -> AuthResult (AuthInfo, AuthResponse)
 digestStage1 auth@(Digest _ _ _ _ _ _ _ _ _ _) r = do  
   pairs <- parsePairs r
-  nonce <- lookup "nonce" pairs
-  realm <- lookup "realm" pairs
-  uri <- lookup "digest-uri" pairs
+  nonce <- lookupItem "nonce" pairs
+  realm <- lookupItem "realm" pairs
+  uri <- lookupItem "digest-uri" pairs
   if (nonce /= (digNonce auth)) || (realm /= (digRealm auth)) 
-    then Nothing
+    then Left Mismatch
     else do
-      response <- lookup "response" pairs
-      clientNonce <- lookup "cnonce" pairs
-      uid <- lookup "username" pairs
-      nc <- lookup "nc" pairs
-      qop <- lookup "qop" pairs
-      let authzid = fromMaybe "" $ lookup "authzid" pairs 
+      response <- lookupItem "response" pairs
+      clientNonce <- lookupItem "cnonce" pairs
+      uid <- lookupItem "username" pairs
+      nc <- lookupItem "nc" pairs
+      qop <- lookupItem "qop" pairs
+      let authzid = either (\_ -> "") id $ lookupItem "authzid" pairs 
       let auth' = auth { digUid = uid,
                          digCNonce = clientNonce,
                          digResponse = response,
@@ -123,12 +144,12 @@ digestStage1 auth@(Digest _ _ _ _ _ _ _ _ _ _) r = do
                          digUri = uri,
                          digQop = qop,
                          digState = Unauthenticated }
-      return (auth', NeedsAuthentication)
+      Right (auth', NeedsAuthentication)
                     
-digestStage2 :: AuthInfo -> Maybe (AuthInfo, AuthResponse)
-digestStage2 auth = do
-  let auth' = auth { digState = Authenticated } 
-  return (auth', Success)
+digestStage2 :: AuthInfo -> AuthResult (AuthInfo, AuthResponse)
+digestStage2 auth =
+  let auth' = auth { digState = Authenticated } in
+  Right (auth', Success)
 
 {-
 needsAuthentication :: AuthInfo -> Bool
@@ -247,10 +268,10 @@ hashS = hashL . LazyUtf8.fromString
 getUid :: AuthInfo -> String
 getUid auth@(Digest _ _ uid _ _ _ _ _ _ _) = uid
 
-parsePairs :: String -> Maybe [(String, String)]
+parsePairs :: String -> AuthResult [(String, String)]
 parsePairs s = case parse pairs "" s of
-                 Right r -> Just r
-                 _ -> Nothing
+                 Right r -> Right r
+                 _ -> Left ProtocolFailure
   
 pairs :: Parser [(String,String)]
 pairs = do

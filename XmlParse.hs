@@ -2,95 +2,33 @@
    without requiring the whole document
 -}
 
-module XmlParse ( XmlElement(XmlElement,XmlText),
-                  XmlAttribute(XmlAttribute),
-                  xmlFormatElement,
-                  xmlFormatElements,
-                  xmlFormatShortElement,
-                  xmlNewElement,
-                  xmlGetAttribute,
-                  xmlGetChild,
-                  xmlProcessingInstruction,
-                  xmlNestedTag,
-                  xmlNestedTags,
-                  xmlSimpleTag,
-                  xmlTrim,
-                  xmlGetRemainder) where
+module XmlParse ( processingInstruction,
+                  processingInstructions,
+                  nestedTag,
+                  nestedTags,
+                  simpleTag,
+                  trim,
+                  getRemainder) where
   
 import Text.ParserCombinators.Parsec
 import Text.ParserCombinators.Parsec.Char
 import Text.ParserCombinators.Parsec.Error
 import Data.List
+import Xml
 
-data XmlElement = XmlElement { elemNamespace :: !String,
-                               elemName :: !String,
-                               attributes :: ![XmlAttribute],
-                               children :: ![XmlElement] }
-                | XmlText String
-                deriving (Show, Eq)
-                
-data XmlAttribute = XmlAttribute { attrNamespace :: String, 
-                                   attrName :: String, 
-                                   attrValue :: String }
-  deriving (Show, Eq)
+nestedTags :: Parser [XmlElement]
+nestedTags = many $ nestedTag
 
-xmlNewElement :: String -> XmlElement
-xmlNewElement n = XmlElement "" n [] []
-
-xmlGetAttribute :: String -> String -> XmlElement -> Maybe String
-xmlGetAttribute nameSpace name (XmlElement _ _ attributes _) = do
-  attrib <- find (\(XmlAttribute ns n _) ->ns == nameSpace && n == name) attributes
-  return $ attrValue attrib
-
-xmlGetChild :: XmlElement -> Int -> Maybe XmlElement
-xmlGetChild e@(XmlElement _ _ _ children) n = 
-  if (length children) > n then
-    Just $ children !! n
-  else 
-    Nothing
-
-xmlFormatElements :: Bool -> [XmlElement] -> String
-xmlFormatElements short elems = (concat $ map (xmlFormatElement short) elems)
-
-xmlFormatElement :: Bool -> XmlElement -> String
-xmlFormatElement short e@(XmlElement _ _ attribs subs) =
-  let fullName = xmlQualifiedName e in 
-    "<" ++ fullName ++ 
-      xmlFormatAttributes attribs ++ ">" ++
-      if short then 
-        "" 
-      else
-        (xmlFormatElements False subs) ++ "</" ++ fullName ++ ">"
-xmlFormatElement _ (XmlText s) = s
-        
-xmlFormatShortElement :: XmlElement -> String
-xmlFormatShortElement = xmlFormatElement True
-
-xmlQualifiedName :: XmlElement -> String
-xmlQualifiedName (XmlElement ns n _ _) =
-  if ns == "" then n
-  else ns ++ ":" ++ n
-    
-xmlFormatAttributes :: [XmlAttribute] -> String
-xmlFormatAttributes [] = ""
-xmlFormatAttributes attrs = concat $ 
-  map (\(XmlAttribute ns name value) -> 
-        let fullname = if ns == "" then name else ns ++ ":" ++ name
-        in " " ++ fullname ++ "=\"" ++ value ++ "\"") attrs
-
-xmlNestedTags :: Parser [XmlElement]
-xmlNestedTags = many $ xmlNestedTag
-
-xmlNestedTag :: Parser XmlElement
-xmlNestedTag = do
-  (XmlElement namespace name attributes _) <- xmlTagStart
+nestedTag :: Parser XmlElement
+nestedTag = do
+  (XmlElement namespace name attributes _) <- tagStart
   
   let fullname = case namespace of "" -> name; _ -> namespace ++ ":" ++ name
     
   many space
   subElements <- (try $ do {char '/'; char '>'; return []}) <|> do 
     char '>'
-    elements <- many $ (try xmlNestedTag) <|> xmlText
+    elements <- many $ (try nestedTag) <|> text
     char '<'
     char '/'
     string fullname
@@ -98,18 +36,18 @@ xmlNestedTag = do
     return elements
   return $ XmlElement namespace name attributes subElements
   
-xmlSimpleTag :: Parser XmlElement
-xmlSimpleTag = do 
-  tag <- xmlTagStart
+simpleTag :: Parser XmlElement
+simpleTag = do 
+  tag <- tagStart
   char '>'
   return tag
 
-xmlText :: Parser XmlElement
-xmlText = do
-    text <- many1 $ xmlPlainData <|> xmlEntity
+text :: Parser XmlElement
+text = do
+    text <- many1 $ plainData <|> escapedChar
     return $ XmlText text
-  where xmlPlainData = satisfy (\c -> (c /= '<') && (c /= '&') )
-        xmlEntity = do
+  where plainData = satisfy (\c -> (c /= '<') && (c /= '&') )
+        escapedChar = do
           char '&'
           entity <- try (string "amp") <|>
                     try (string "lt") <|>
@@ -124,59 +62,62 @@ xmlText = do
             "quot" -> '"'
             "apos" -> '\''
   
-xmlTagStart :: Parser XmlElement
-xmlTagStart = do
+tagStart :: Parser XmlElement
+tagStart = do
   char '<'
-  (namespace, name) <- xmlName
+  (namespace, name) <- name
   many space
   attributes <- many $ do
-    attr <- xmlAttribute
+    attr <- attribute
     many space
     return attr
   return $ XmlElement namespace name attributes []
   
-xmlAttribute :: Parser XmlAttribute
-xmlAttribute = do
-  (namespace, name) <- xmlName
+attribute :: Parser XmlAttribute
+attribute = do
+  (namespace, name) <- name
   char '='
   quote <- char '\'' <|> char '"'
   value <- many1 $ satisfy (/= quote)
   char quote
   return $ XmlAttribute namespace name value
   
-xmlName :: Parser (String, String)
-xmlName = do 
-  namespace <- (try xmlNamespace) <|> string ""
-  name <- many1 xmlTokenChar
+name :: Parser (String, String)
+name = do 
+  namespace <- (try namespace) <|> string ""
+  name <- many1 tokenChar
   return (namespace, name)
   
-xmlNamespace :: Parser String
-xmlNamespace = do
-  x <- many xmlTokenChar
+namespace :: Parser String
+namespace = do
+  x <- many tokenChar
   char ':'
   return x
   
-xmlTokenChar :: Parser Char
-xmlTokenChar = letter <|> char '-'
+tokenChar :: Parser Char
+tokenChar = letter <|> char '-'
 
-xmlTrim :: Parser a -> Parser a
-xmlTrim p = do 
+trim :: Parser a -> Parser a
+trim p = do 
   spaces
   x <- p
   spaces
   return x
 
-xmlGetRemainder :: Parser a -> Parser (a, String)
-xmlGetRemainder p = do
+getRemainder :: Parser a -> Parser (a, String)
+getRemainder p = do
   x <- try p
   r <- getInput
   return (x,r)
 
-xmlProcessingInstruction :: Parser ()
-xmlProcessingInstruction = do
+processingInstructions :: Parser [XmlElement]
+processingInstructions = many processingInstruction
+  
+processingInstruction :: Parser XmlElement
+processingInstruction = do
   char '<'
   char '?'
-  many $ satisfy (/= '?')
+  text <- many $ satisfy (/= '?')
   char '?'
   char '>'
-  return ()
+  return $ XmlProcessingInstruction text
