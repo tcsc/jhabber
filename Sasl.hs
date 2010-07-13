@@ -60,11 +60,10 @@ data AuthFailure = UnsupportedMechanism
                  | ProtocolFailure
                  | Mismatch
                  | Unexpected
+                 deriving (Read, Show)
                  
 instance Error AuthFailure where
-  noMsg    = strMsg ""
-  strMsg _ = noMsg
-
+  strMsg x = read x
 
 type AuthResult = Either AuthFailure
 

@@ -1,11 +1,15 @@
 {-# LANGUAGE TypeSynonymInstances, OverlappingInstances #-}
 
-module Connection (
-  Connection,
-  Callback,
-  startConnection,
-  connectionId
-) where
+module Connection 
+
+where
+
+  {- (
+    Connection,
+    Callback,
+    startConnection,
+    connectionId
+  ) -}
 
 import Control.Monad( liftM )
 import Control.Monad.Maybe
@@ -14,6 +18,7 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TVar
 import Control.Exception(finally)
+import Control.Monad.Error
 import qualified Data.ByteString.UTF8 as Utf8
 import Data.List
 import Data.Either
@@ -21,7 +26,7 @@ import Data.IORef
 import Network.BSD
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
-import System.Log.Logger(debugM)
+import qualified System.Log.Logger as L
 import Text.ParserCombinators.Parsec(Parser, parse, try, (<|>))
 import Text.ParserCombinators.Parsec.Error
 
@@ -30,7 +35,6 @@ import Sasl
 import Xml
 import qualified XmlParse as XmlParse
 import qualified XMPP as Xmpp
-import EitherM
 
 {-| 
  A signal to the reader of what it should expect from the XML stream from next
@@ -81,18 +85,23 @@ data ReaderState = ReaderState { rdrCondVar :: ResponseVar,
 instance Show (ReaderState) where
   show (ReaderState _ _ _ ex) = "Expected: " ++ (show ex)   
                                  
-type EitherIO a b = IO (Either a b)
-
 data ReadFailure = ParseFailure
                  | InsufficientData
-                 deriving (Show, Eq)
-                 
-type ReadResult = Either ReadFailure
-                 
-data ConnFailure = AuthFailure
-                 deriving (Show, Eq)
+                 deriving (Read, Show, Eq)
+instance Error ReadFailure where 
+  strMsg x = read x
+  
+type ReadResult a = Either ReadFailure a
+type ReadResultIO a = ErrorT ReadFailure IO a
 
-type ConnResult = Either ConnFailure
+data ConnFailure = AuthFailure
+                 | UnsupportedMechanism
+                 deriving (Read, Show, Eq)
+instance Error ConnFailure where
+  strMsg x = read x
+type ConnResult a = Either ConnFailure a
+type ConnResultIO a = ErrorT ConnFailure IO a 
+
   
 {- ------------------------------------------------------------------------- -}
 
@@ -119,12 +128,15 @@ runConnection s  = do
     forkIO $ runReader (msgQ s) sock
     loop (msgQ s) s `finally` sClose sock
   where
+    loop :: ConnMsgQ -> ConnectionState -> IO ()
     loop q state = do
       msg <- atomically $ readTChan q
-      rval <- handleMessage msg state 
+      rval <- runErrorT $ handleMessage msg state 
       case rval of
-        Just state' -> loop q state'
-        Nothing -> return ()
+        Right state' -> loop q state'
+        Left e -> do
+          debug $ "Message processing failure: " ++ (show e)
+          loop q state
 
 runReader :: ConnMsgQ -> Socket -> IO ()
 runReader q s = do
@@ -141,7 +153,7 @@ runReader q s = do
       buffer <- readIORef bufferRef
       input <- recv socket 1024
 
-      result <- processStanzas queue (buffer ++ (Utf8.toString input)) state
+      result <- runErrorT $ processStanzas queue (buffer ++ (Utf8.toString input)) state
       case result of 
         Right (leftovers, state') -> do
           writeIORef bufferRef leftovers
@@ -151,52 +163,53 @@ runReader q s = do
           debug $ "Error: " ++ (show err) ++ ", bailing out"
           atomically $ writeTChan q (ProtocolError)
 
-processStanzas :: ConnMsgQ -> String -> ReaderState -> EitherIO ReadFailure (String, ReaderState)
-processStanzas q "" state = return $ Right ("", state)
+processStanzas :: ConnMsgQ -> String -> ReaderState -> ReadResultIO (String, ReaderState)
+processStanzas q "" state = return ("", state)
 processStanzas q text state@(ReaderState _ _ _ expected) = do
-  debug $ "Processing " ++ text
-  debug $ "state =  " ++ (show state)
+  (lift . debug) $ "Processing " ++ text
+  (lift . debug) $ "state =  " ++ (show state)
   
   case readXml text (parser state) of
     Right (leftovers, xml) -> do
-       response <- processStanza q state xml
-       case response of
-         Right state' -> processStanzas q leftovers state'
-         Left err -> return $ Left err
+       state' <- processStanza q state xml
+       processStanzas q leftovers state'
         
     -- not enough data to read the expected element out of the XML stream...
     -- tell the caller to buffer whatever it is we've got left and go around
     -- again next time data arrives from the client
-    Left InsufficientData -> return $ Right (text, state)
+    Left InsufficientData -> return (text, state)
     
     -- something nasty happened - pass the error up to the caller
-    Left err -> return $ Left err
-    
-processStanza :: ConnMsgQ -> ReaderState -> XmlElement -> EitherIO ReadFailure ReaderState
-processStanza q state (XmlProcessingInstruction _) =  return $ Right state
+    Left _ -> throwError ParseFailure
+
+{-|
+  Proceses an individual XML block
+ -}
+processStanza :: ConnMsgQ -> ReaderState -> XmlElement -> ReadResultIO ReaderState
+processStanza q state (XmlProcessingInstruction _) =  return state
 processStanza q state@(ReaderState _ _ _ expected) xml = do
-  debug $ "xml: " ++ (show xml)
+  (lift . debug) $ "xml: " ++ (show xml)
   
   let expected' = if expected == Preamble then StreamStart else expected 
   let state' = state {rdrExpect = expected'}
   
   case Xmpp.fromXml xml of 
     Just stanza -> do
-      debug $ "stanza: " ++ (show stanza)
+      (lift . debug) $ "stanza: " ++ (show stanza)
       let rVar = rdrCondVar state
-      atomically $ writeTChan q (InboundXmpp stanza rVar)
-      debug $ "Waiting for response..."
-      rval <- takeMVar rVar
-      debug $ "Response was " ++ (show rval)
+      (lift . atomically) $ writeTChan q (InboundXmpp stanza rVar)
+      (lift . debug) $ "Waiting for response..."
+      rval <- (lift . takeMVar) rVar
+      (lift . debug) $ "Response was " ++ (show rval)
       
       return $ processResponse state rval
-      
-    Nothing -> do
-      debug $ "parse failure"
-      return $ Left ParseFailure 
+    -- this is just an xml-to-xmpp translation failure, which shouldn't
+    -- necessarily be a fatal error... just return the existing state and carry
+    -- on
+    Nothing -> return state
   where 
-    processResponse :: ReaderState -> [Response] -> Either ReadFailure ReaderState
-    processResponse s r = Right $ foldl' updateState s r
+    processResponse :: ReaderState -> [Response] -> ReaderState
+    processResponse s r = foldl' updateState s r
      
     updateState :: ReaderState -> Response -> ReaderState
     updateState s (Connection.Expect expected) = s {rdrExpect = expected}
@@ -224,98 +237,71 @@ parser (ReaderState _ _ _ expected) =
     StreamStart -> XmlParse.simpleTag
     _ -> XmlParse.nestedTag
           
-handleMessage :: ConnMsg -> ConnectionState -> IO (Maybe ConnectionState)
+handleMessage :: ConnMsg -> ConnectionState -> ConnResultIO ConnectionState
 handleMessage (InboundXmpp (Xmpp.RxStreamOpen _ _) sig) state = do
-  debug $ "received stream open block"
+  debugM $ "received stream open block"
   let s = stateSocket state
-  xmppSend s $ Xmpp.TxStreamOpen "localhost" (idNumber state)
-  xmppSend s $ xmppFeatures
-  putMVar sig [Ok, Connection.Expect Any]
-  return (Just state)
+  liftIO $ xmppSend s $ Xmpp.TxStreamOpen "localhost" (idNumber state)
+  liftIO $ xmppSend s $ xmppFeatures
+  liftIO $ putMVar sig [Ok, Connection.Expect Any]
+  return state
 
 handleMessage (InboundXmpp (Xmpp.AuthMechanism m) sig) state = do
-  debug $ "received authentication selection request: " ++ m
-  auth <- newAuthInfo m "jhabber"
+  debugM $ "received authentication selection request: " ++ m
+  auth <- liftIO $ newAuthInfo m "jhabber"
   case auth of
     Just a -> do 
-      xmppSend (stateSocket state) $ Xmpp.AuthChallenge (challenge a)
+      liftIO $ xmppSend (stateSocket state) $ Xmpp.AuthChallenge (challenge a)
       let state' = state { authInfo = a }
-      putMVar sig [Ok]
-      return $ Just state'
-    Nothing -> do
-      -- unsupported authentication mechanism. Bail.
-      return Nothing
+      liftIO $ putMVar sig [Ok]
+      return state'
+    Nothing -> throwError UnsupportedMechanism
 
 handleMessage (InboundXmpp (Xmpp.AuthResponse r) sig) state = do
-  debug $ "received authentication response " ++ (show $ authInfo state) 
-  result <- case checkResponse (authInfo state) r of
-    Right (authInfo', authAction) -> do
-      newStateE <- sendAuthResponse state authInfo' authAction
-      case newStateE of
-        Right state' -> return $ Right (state', authAction)
-        Left e -> return $ Left AuthFailure
-    Left _ -> return $ Left AuthFailure
+  debugM $ "received authentication response " ++ (show $ authInfo state)
+  case checkResponse (authInfo state) r of
+    Right (authInfo', authAction) -> do 
+      state' <- handleAuthResponse state authInfo' authAction
+      let expected = if authAction == Success then StreamStart else Any
+      liftIO $ putMVar sig [Ok, Connection.Expect expected]
+      return state'
+    Left _ -> throwError AuthFailure
+  `catchError` \e -> do
+    liftIO $ debug $ "Error handling auth response: " ++ (show e)
+    case e of 
+      AuthFailure -> do
+        liftIO $ authFailure state "temporary-auth-failure"
+        liftIO $ putMVar sig [Quit]
+      _ -> return ()
+    throwError e
 
-  case result of 
-    Right (s, a) -> do 
-      let expected = if a == Success then StreamStart else Any
-      putMVar sig [Ok, Connection.Expect expected]
-      return $ Just s
-      
-    Left _ -> do
-      authFailure state "temporary-auth-failure"
-      putMVar sig [Quit]
-      return Nothing
-          
-  {-
-  case of
-    Right (authInfo', rval) -> 
-      r <- generateResponse state authInfo' rval
-      case r of 
-        Right state' -> do 
-          putMVar sig [Ok, Connection.Expect StreamStart]
-          return $ Just state'
-          
-        Left _ -> do
-          authFailure state "temporary-auth-failure"
-          putMVar sig [Quit]
-          return Nothing
-    Left _ -> do
-      authFailure state "temporary-auth-failure"
-      putMVar sig [Quit]
-      return Nothing
-  -}
-      
-handleMessage m s = return (Just s)
+handleMessage m s = return s
 
-sendAuthResponse :: ConnectionState -> AuthInfo -> AuthResponse -> EitherIO ConnFailure ConnectionState
-sendAuthResponse state auth response = do
-  debug $ "auth: " ++ (show response)
+handleAuthResponse :: ConnectionState -> AuthInfo -> AuthResponse -> ConnResultIO ConnectionState
+handleAuthResponse state auth response = do
+  debugM $ "auth: " ++ (show response)
   let sock = stateSocket state
   case response of
-    NeedsAuthentication -> 
-      authenticate state auth
+    NeedsAuthentication -> authenticate state auth
     Challenge s -> do 
-      xmppSend sock $ Xmpp.AuthChallenge s 
-      return $ Right state { authInfo = auth } 
+      liftIO $ xmppSend sock $ Xmpp.AuthChallenge s 
+      return state { authInfo = auth } 
     Success -> do
-      xmppSend sock $ Xmpp.AuthSuccess
-      return $ Right state { authInfo = auth }
+      liftIO $ xmppSend sock $ Xmpp.AuthSuccess
+      return state { authInfo = auth }
 
-authenticate :: ConnectionState -> AuthInfo -> EitherIO ConnFailure ConnectionState
+authenticate :: ConnectionState -> AuthInfo -> ConnResultIO ConnectionState
 authenticate state authInfo = do
   -- TODO: lookup this user's *actual* password here
-  let pwd = "pwd"
+  let pwd = "__badpwd__"
   let uid = getUid authInfo
 
   case checkCredentials authInfo uid pwd of
     Right (authInfo', Challenge rval) -> do
-      xmppSend (stateSocket state) $ Xmpp.AuthChallenge rval
-      return (Right $ state { authInfo = authInfo' } )
+      liftIO $ xmppSend (stateSocket state) $ Xmpp.AuthChallenge rval
+      return state { authInfo = authInfo' }
       
-    Left _ -> do
-      authFailure state "temporary-auth-failure"
-      return $ Left AuthFailure
+    Left _ -> throwError AuthFailure
 
 authFailure :: ConnectionState -> String -> IO ()
 authFailure state reason = xmppSend (stateSocket state)  $ Xmpp.newAuthFailure reason
@@ -341,4 +327,7 @@ xmppMechanisms = [
   (XmlElement "" "mechanism" [] [XmlText "DIGEST-MD5"]), 
   (XmlElement "" "mechanism" [] [XmlText "PLAIN"]) ]
 
-debug = debugM "conn"
+debugM s = liftIO $ debug s
+
+debug :: String -> IO ()
+debug = L.debugM "conn"
