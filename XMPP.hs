@@ -14,6 +14,12 @@ import qualified XmlParse as XmlParse
 import Sasl
 import TextUtils
 
+data IqAction = Set
+              | Get
+              | Result
+              | Error
+              deriving (Show)
+
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
             | Features [XmlElement]
@@ -22,12 +28,16 @@ data Stanza = RxStreamOpen String Float
             | AuthResponse String
             | AuthSuccess
             | Failure String XmlElement
+            | Iq IqAction String
             deriving (Show)
+
+nsJabber = "jabber:client"
+nsStreams = "http://etherx.jabber.org/streams"
 
 namespaces :: [XmlAttribute]
 namespaces = [
-  (XmlAttribute "" "xmlns" "jabber:client"),
-  (XmlAttribute "xmlns" "stream" "http://etherx.jabber.org/streams") ]
+  (XmlAttribute "" "xmlns" nsJabber),
+  (XmlAttribute "xmlns" "stream" nsStreams) ]
 
 txStreamStart :: String -> Integer -> XmlElement
 txStreamStart rx sId = 
@@ -37,7 +47,7 @@ txStreamStart rx sId =
       (XmlAttribute "" "from" rx),
       (XmlAttribute "" "id" $ show sId),
       (XmlAttribute "" "version" "1.0") ])]
-  
+        
 {-| Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8 encoded XML -}  
 format :: Stanza -> ByteString
 format (TxStreamOpen host connId) = fromString . formatShortElement $ txStreamStart host connId
@@ -58,26 +68,27 @@ toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
 
 {-| Parses an XML stanza into a (possible) XMPP message -}
 fromXml :: XmlElement -> Maybe Stanza
-fromXml element@(XmlElement ns "stream" attribs _) = do
-  to <- getAttribute "" "to" element
-  verText <- getAttribute "" "version" element
+fromXml element@(XmlElement nsStreams "stream" attribs _) = do
+  to <- getAttribute nsJabber "to" element
+  verText <- getAttribute nsJabber "version" element
   ver <- readM verText
   return $ RxStreamOpen to ver
 
-fromXml element@(XmlElement "" "auth" attribs children) = do 
-  ns <- getAttribute "" "xmlns" element
-  m <- getAttribute "" "mechanism" element
+fromXml element@(XmlElement nsJabber "auth" attribs children) = do 
+  ns <- getAttribute nsJabber "xmlns" element
+  m <- getAttribute nsJabber "mechanism" element
   return $ AuthMechanism m
   
-fromXml element@(XmlElement "" "response" attribs children) = do 
-  ns <- getAttribute "" "xmlns" element
+fromXml element@(XmlElement nsJabber "response" attribs children) = do 
+  ns <- getAttribute nsJabber "xmlns" element
   let mchild = getChild element 0
   case mchild of
     Just (XmlText s) -> do
       bytes <- decode s
       return $ AuthResponse (toString $ pack bytes)
-    
     Nothing -> return $ AuthResponse ""
+    
+--fromXml element@(XmlElement "" "iq")
       
 fromXml element = Nothing
   
