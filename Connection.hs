@@ -80,10 +80,11 @@ data ConnectionState = State { idNumber :: Integer,
 data ReaderState = ReaderState { rdrCondVar :: ResponseVar,
                                  rdrPipeline :: Bool,
                                  rdrBuffer :: IORef String,
-                                 rdrExpect :: ElementType } 
+                                 rdrExpect :: ElementType,
+                                 rdrContext :: !XmlParse.Context } 
 
 instance Show (ReaderState) where
-  show (ReaderState _ _ _ ex) = "Expected: " ++ (show ex)   
+  show (ReaderState _ _ _ ex _) = "Expected: " ++ (show ex)   
                                  
 data ReadFailure = ParseFailure
                  | InsufficientData
@@ -117,9 +118,13 @@ startConnection r cId s onLost = do
                       authInfo = None }
   forkIO $ runConnection state
   return c
+
+{- ------------------------------------------------------------------------- -}
   
 connectionId :: Connection -> Integer
 connectionId (Conn id _) = id
+
+{- ------------------------------------------------------------------------- -}
 
 runConnection :: ConnectionState -> IO ()
 runConnection s  = do
@@ -138,6 +143,8 @@ runConnection s  = do
           debug $ "Message processing failure: " ++ (show e)
           loop q state
 
+{- ------------------------------------------------------------------------- -}
+
 runReader :: ConnMsgQ -> Socket -> IO ()
 runReader q s = do
     b <- newIORef ""
@@ -145,11 +152,13 @@ runReader q s = do
     let state = ReaderState { rdrCondVar = cv, 
                               rdrPipeline = False,
                               rdrBuffer = b,
-                              rdrExpect = Preamble }
+                              rdrExpect = Preamble,
+                              rdrContext = XmlParse.newContext }
     readLoop q s state
   where
     readLoop :: ConnMsgQ -> Socket -> ReaderState -> IO ()
-    readLoop queue socket state@(ReaderState _ _ bufferRef _) = do
+    readLoop queue socket state = do
+      let bufferRef = rdrBuffer state
       buffer <- readIORef bufferRef
       input <- recv socket 1024
 
@@ -163,44 +172,68 @@ runReader q s = do
           debug $ "Error: " ++ (show err) ++ ", bailing out"
           atomically $ writeTChan q (ProtocolError)
 
+{- ------------------------------------------------------------------------- -}
+
 processStanzas :: ConnMsgQ -> String -> ReaderState -> ReadResultIO (String, ReaderState)
 processStanzas q "" state = return ("", state)
-processStanzas q text state@(ReaderState _ _ _ expected) = do
-  (lift . debug) $ "Processing " ++ text
-  (lift . debug) $ "state =  " ++ (show state)
-  
-  case readXml text (parser state) of
-    Right (leftovers, xml) -> do
-       state' <- processStanza q state xml
-       processStanzas q leftovers state'
-        
+processStanzas q text state =  do
+  debugM $ "Processing " ++ text
+  debugM $ "state =  " ++ (show state)
+
+  case readXml state text of
+    Right (leftovers, xml, state') -> do
+      state'' <- processStanza q state' xml
+      processStanzas q leftovers state''
+
+    -- we're at the end of the document preamble. Change the expected value to
+    -- "stream start" and try again
+    Left XmlParse.NoMorePreamble ->
+      processStanzas q text (state { rdrExpect = StreamStart })
+      
     -- not enough data to read the expected element out of the XML stream...
     -- tell the caller to buffer whatever it is we've got left and go around
     -- again next time data arrives from the client
-    Left InsufficientData -> return (text, state)
-    
+    Left XmlParse.InsufficientData -> return (text, state)
+
     -- something nasty happened - pass the error up to the caller
     Left _ -> throwError ParseFailure
+      
+{- ------------------------------------------------------------------------- -}
+    
+readXml :: ReaderState -> String -> XmlParse.XmlResult (String, XmlElement, ReaderState)
+readXml state@(ReaderState _ _ _ Preamble _) text = do
+  (remainder, xml) <- XmlParse.parsePreamble text
+  return (remainder, xml, state)
+
+readXml state@(ReaderState _ _ _ StreamStart ctx) text = do
+  (remainder, xml, ctx') <- XmlParse.parseStartTag ctx text
+  return (remainder, xml, state { rdrContext = ctx' })
+
+readXml state@(ReaderState _ _ _ Any ctx) text = do
+  (remainder, xml) <- XmlParse.parseNestedTag ctx text
+  return (remainder, xml, state)
+      
+{- ------------------------------------------------------------------------- -}
 
 {-|
   Proceses an individual XML block
  -}
 processStanza :: ConnMsgQ -> ReaderState -> XmlElement -> ReadResultIO ReaderState
 processStanza q state (XmlProcessingInstruction _) =  return state
-processStanza q state@(ReaderState _ _ _ expected) xml = do
+processStanza q state@(ReaderState _ _ _ expected ctx) xml = do
   (lift . debug) $ "xml: " ++ (show xml)
-  
+    
   let expected' = if expected == Preamble then StreamStart else expected 
   let state' = state {rdrExpect = expected'}
   
   case Xmpp.fromXml xml of 
     Just stanza -> do
-      (lift . debug) $ "stanza: " ++ (show stanza)
+      debugM $ "stanza: " ++ (show stanza)
       let rVar = rdrCondVar state
-      (lift . atomically) $ writeTChan q (InboundXmpp stanza rVar)
-      (lift . debug) $ "Waiting for response..."
+      liftIO $ atomically $ writeTChan q (InboundXmpp stanza rVar)
+      debugM $ "Waiting for response..."
       rval <- (lift . takeMVar) rVar
-      (lift . debug) $ "Response was " ++ (show rval)
+      debugM $ "Response was " ++ (show rval)
       
       return $ processResponse state rval
     -- this is just an xml-to-xmpp translation failure, which shouldn't
@@ -215,67 +248,57 @@ processStanza q state@(ReaderState _ _ _ expected) xml = do
     updateState s (Connection.Expect expected) = s {rdrExpect = expected}
     updateState s _ = s
 
-{-|
- reads an XML element out out of the supplied string and returns both it and
- the remainder of the string
- -}
-readXml :: String -> Parser XmlElement -> ReadResult (String, XmlElement)
-readXml text p = 
-  case parse (XmlParse.getRemainder p) "" text of
-    Right (xml, remainder) -> Right (remainder, xml)
-    Left err -> case head (errorMessages err) of
-      -- simple out-of-data error. No biggie, just go around and try again
-      SysUnExpect [] -> Left InsufficientData
-        
-      -- full-on parse failure... we should do something here 
-      _ -> Left ParseFailure
-        
-parser :: ReaderState -> Parser XmlElement
-parser (ReaderState _ _ _ expected) = 
-  XmlParse.trim $ case expected of 
-    Preamble -> (try XmlParse.processingInstruction) <|> XmlParse.simpleTag
-    StreamStart -> XmlParse.simpleTag
-    _ -> XmlParse.nestedTag
+{- ------------------------------------------------------------------------- -}
           
 handleMessage :: ConnMsg -> ConnectionState -> ConnResultIO ConnectionState
-handleMessage (InboundXmpp (Xmpp.RxStreamOpen _ _) sig) state = do
+handleMessage (InboundXmpp stanza sig) state = 
+  do
+    (response, state') <- handleInboundStanza stanza state
+    liftIO $ putMVar sig response
+    return state'
+  `catchError` \e -> do
+      liftIO $ putMVar sig [Quit]
+      throwError e
+    
+handleMessage m s = return s
+  
+{- ------------------------------------------------------------------------- -}
+  
+handleInboundStanza :: Xmpp.Stanza -> ConnectionState -> ConnResultIO ([Response], ConnectionState)
+handleInboundStanza (Xmpp.RxStreamOpen _ _) state = do
   debugM $ "received stream open block"
   let s = stateSocket state
   liftIO $ xmppSend s $ Xmpp.TxStreamOpen "localhost" (idNumber state)
   liftIO $ xmppSend s $ xmppFeatures
-  liftIO $ putMVar sig [Ok, Connection.Expect Any]
-  return state
+  return ([Ok, Connection.Expect Any], state)
 
-handleMessage (InboundXmpp (Xmpp.AuthMechanism m) sig) state = do
+handleInboundStanza (Xmpp.AuthMechanism m) state = do
   debugM $ "received authentication selection request: " ++ m
   auth <- liftIO $ newAuthInfo m "jhabber"
   case auth of
     Just a -> do 
       liftIO $ xmppSend (stateSocket state) $ Xmpp.AuthChallenge (challenge a)
       let state' = state { authInfo = a }
-      liftIO $ putMVar sig [Ok]
-      return state'
+      return ([Ok], state')
     Nothing -> throwError UnsupportedMechanism
 
-handleMessage (InboundXmpp (Xmpp.AuthResponse r) sig) state = do
+handleInboundStanza (Xmpp.AuthResponse r) state = do
   debugM $ "received authentication response " ++ (show $ authInfo state)
   case checkResponse (authInfo state) r of
     Right (authInfo', authAction) -> do 
       state' <- handleAuthResponse state authInfo' authAction
       let expected = if authAction == Success then StreamStart else Any
-      liftIO $ putMVar sig [Ok, Connection.Expect expected]
-      return state'
+      return ([Ok, Connection.Expect expected], state')
     Left _ -> throwError AuthFailure
   `catchError` \e -> do
     liftIO $ debug $ "Error handling auth response: " ++ (show e)
     case e of 
       AuthFailure -> do
         liftIO $ authFailure state "temporary-auth-failure"
-        liftIO $ putMVar sig [Quit]
       _ -> return ()
     throwError e
 
-handleMessage m s = return s
+{- ------------------------------------------------------------------------- -}
 
 handleAuthResponse :: ConnectionState -> AuthInfo -> AuthResponse -> ConnResultIO ConnectionState
 handleAuthResponse state auth response = do
@@ -290,10 +313,12 @@ handleAuthResponse state auth response = do
       liftIO $ xmppSend sock $ Xmpp.AuthSuccess
       return state { authInfo = auth }
 
+{- ------------------------------------------------------------------------- -}
+
 authenticate :: ConnectionState -> AuthInfo -> ConnResultIO ConnectionState
 authenticate state authInfo = do
   -- TODO: lookup this user's *actual* password here
-  let pwd = "__badpwd__"
+  let pwd = "pwd"
   let uid = getUid authInfo
 
   case checkCredentials authInfo uid pwd of
@@ -302,6 +327,8 @@ authenticate state authInfo = do
       return state { authInfo = authInfo' }
       
     Left _ -> throwError AuthFailure
+
+{- ------------------------------------------------------------------------- -}
 
 authFailure :: ConnectionState -> String -> IO ()
 authFailure state reason = xmppSend (stateSocket state)  $ Xmpp.newAuthFailure reason

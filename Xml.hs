@@ -1,4 +1,4 @@
-module Xml ( XmlElement(XmlElement,XmlText,XmlProcessingInstruction),
+module Xml ( XmlElement(..),
              XmlAttribute(XmlAttribute),
              formatElement,
              formatElements,
@@ -21,7 +21,7 @@ data XmlElement = XmlElement { elemNamespace :: !String,
 data XmlAttribute = XmlAttribute { attrNamespace :: String, 
                                    attrName :: String, 
                                    attrValue :: String }
-  deriving (Show, Eq)
+                                   deriving (Show, Eq)
 
 newElement :: String -> XmlElement
 newElement n = XmlElement "" n [] []
