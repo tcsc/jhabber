@@ -6,7 +6,7 @@ module Sasl ( AuthInfo(None),
               checkResponse,
               checkCredentials,
               getUid,
-              saslNamespace ) where
+              nsSasl ) where
 
 import Control.Monad.Error  
 import qualified Data.ByteString as BS
@@ -67,8 +67,8 @@ instance Error AuthFailure where
 
 type AuthResult = Either AuthFailure
 
-saslNamespace :: String
-saslNamespace = "urn:ietf:params:xml:ns:xmpp-sasl"
+nsSasl :: String
+nsSasl = "urn:ietf:params:xml:ns:xmpp-sasl"
               
 newAuthInfo :: String -> String -> IO (Maybe AuthInfo)
 newAuthInfo "DIGEST-MD5" realm = do

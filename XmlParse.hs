@@ -26,6 +26,8 @@ import Data.Either
 import Data.List
 import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified System.Log.Logger as Log
+import System.IO.Unsafe
 import Xml
 
 type NsTable = Map String String
@@ -150,7 +152,7 @@ canonicalizeNames _ element = element
 nsLookup :: NsTable -> String -> String
 nsLookup nsm ns = case Map.lookup ns nsm of
   Just ns' -> ns'
-  Nothing -> ""
+  Nothing -> ns
 
 {- ------------------------------------------------------------------------- -}
 
@@ -166,15 +168,19 @@ nestedTag nst =
     many space
     subElements <- (try $ do {char '/'; char '>'; return []}) <|> do 
       char '>'
-      elements <- many $ (try $ nestedTag nst') <|> text
+      elements <- many $ (try $ nestedTag nst') <|> (trim text)
       char '<'
       char '/'
       string fullname
       char '>'
       return elements
     
+    let! _ = debugM $ "before: " ++ (show attrs)
+    
     let attrs' = foldl' (filterAttribs nst') [] attrs
     let namespace' = (nsLookup nst' namespace)
+
+    let! _ = debugM $ "after: " ++ (show attrs')
   
     return $ XmlElement namespace' name attrs' subElements
 
@@ -224,12 +230,14 @@ tagStart nst = do
   (nst', attrs) <- XmlParse.attributes nst
   return (nst', XmlElement namespace name attrs [])
 
+{- ------------------------------------------------------------------------- -}
+
 attributes :: NsTable -> Parser (NsTable, [XmlAttribute])
 attributes nst = do
     as <- many $ do 
-      (nst', attr) <- attribute nst
+      (nsEntry, attr) <- attribute
       many space 
-      return (nst', attr)
+      return (nsEntry, attr)
     return $ foldl' unpack (nst, []) as
   where
     unpack :: (NsTable, [XmlAttribute]) -> 
@@ -241,25 +249,22 @@ attributes nst = do
         
 {- ------------------------------------------------------------------------- -}
   
-attribute :: NsTable -> Parser (Maybe (String, String), XmlAttribute)
-attribute nst = do
+attribute :: Parser (Maybe (String, String), XmlAttribute)
+attribute = do
     (ns, name) <- elementName
     char '='
     quote <- char '\'' <|> char '"'
     value <- many1 $ satisfy (/= quote)
     char quote
-
-    let (ns', nst') = scanNamespaces ns name value nst
-
-    return (nst', XmlAttribute ns' name value)
+        
+    return (nsEntry ns name value, XmlAttribute ns name value)
   where
-    scanNamespaces :: String -> String -> String -> NsTable -> (String, Maybe (String, String))
-    scanNamespaces ns n v nst = 
-      if n == "xmlns"
-        then ("", Just ("",v))
-          else if ns == "xmlns" 
-            then (ns, Just(n,v))
-            else ((nsLookup nst ns), Nothing)
+    nsEntry :: String -> String -> String -> Maybe(String, String)
+    nsEntry ns "xmlns" v = Just ("", v)
+    nsEntry "xmlns" n v = Just (n, v)
+    nsEntry _ _ _ = Nothing
+    
+{- ------------------------------------------------------------------------- -}
     
 elementName :: Parser (String, String)
 elementName = do 
@@ -305,3 +310,5 @@ processingInstruction = do
   char '?'
   char '>'
   return $ XmlProcessingInstruction text
+  
+debugM = unsafePerformIO . Log.debugM "xml"

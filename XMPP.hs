@@ -58,10 +58,10 @@ toXml :: Stanza -> XmlElement
 toXml (Features fs) = XmlElement "stream" "features" [] fs
 
 toXml (AuthChallenge c) = XmlElement "" "challenge"
-  [XmlAttribute "" "xmlns" saslNamespace] 
+  [XmlAttribute "" "xmlns" nsSasl] 
   [XmlText $ (encode . unpack . fromString) c]
 
-toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" saslNamespace] []
+toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
 
 toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
@@ -74,13 +74,11 @@ fromXml element@(XmlElement nsStreams "stream" attribs _) = do
   ver <- readM verText
   return $ RxStreamOpen to ver
 
-fromXml element@(XmlElement nsJabber "auth" attribs children) = do 
-  ns <- getAttribute nsJabber "xmlns" element
-  m <- getAttribute nsJabber "mechanism" element
+fromXml element@(XmlElement nsSasl "auth" attribs children) = do 
+  m <- getAttribute nsSasl "mechanism" element
   return $ AuthMechanism m
   
-fromXml element@(XmlElement nsJabber "response" attribs children) = do 
-  ns <- getAttribute nsJabber "xmlns" element
+fromXml element@(XmlElement nsSasl "response" attribs children) = do 
   let mchild = getChild element 0
   case mchild of
     Just (XmlText s) -> do
@@ -93,7 +91,7 @@ fromXml element@(XmlElement nsJabber "response" attribs children) = do
 fromXml element = Nothing
   
 newAuthFailure :: String -> Stanza
-newAuthFailure f = Failure (saslNamespace) child
+newAuthFailure f = Failure (nsSasl) child
  where child = newElement f
   
 textFilter :: XmlElement -> Bool
