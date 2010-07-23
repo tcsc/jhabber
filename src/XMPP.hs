@@ -3,7 +3,7 @@ module XMPP ( Stanza(..),
               format,
               fromXml,
               newAuthFailure) where
-                
+
 import Codec.Binary.Base64(encode, decode)
 import Data.ByteString(ByteString, pack, unpack)
 import Data.ByteString.UTF8(fromString, toString)
@@ -19,6 +19,9 @@ data IqAction = Set
               | Result
               | Error
               deriving (Show)
+
+-- | Represents a Jabber ID triplet of node, host and resource ID
+data JID = JID String String String
 
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
@@ -40,25 +43,27 @@ namespaces = [
   (XmlAttribute "xmlns" "stream" nsStreams) ]
 
 txStreamStart :: String -> Integer -> XmlElement
-txStreamStart rx sId = 
+txStreamStart rx sId =
     XmlElement "stream" "stream" attribs []
-  where 
+  where
     attribs = concat [namespaces, ([
       (XmlAttribute "" "from" rx),
       (XmlAttribute "" "id" $ show sId),
       (XmlAttribute "" "version" "1.0") ])]
-        
-{-| Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8 encoded XML -}  
+
+{-| Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8 encoded XML -}
 format :: Stanza -> ByteString
 format (TxStreamOpen host connId) = fromString . formatShortElement $ txStreamStart host connId
 format stanza = fromString . formatElement False $ toXml stanza
+
+{- ------------------------------------------------------------------------- -}
 
 {-| Takes an XMPP message and formats it as an XML element -}
 toXml :: Stanza -> XmlElement
 toXml (Features fs) = XmlElement "stream" "features" [] fs
 
 toXml (AuthChallenge c) = XmlElement "" "challenge"
-  [XmlAttribute "" "xmlns" nsSasl] 
+  [XmlAttribute "" "xmlns" nsSasl]
   [XmlText $ (encode . unpack . fromString) c]
 
 toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
@@ -66,7 +71,9 @@ toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
 toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
 
-{-| Parses an XML stanza into a (possible) XMPP message -}
+{- ------------------------------------------------------------------------- -}
+
+-- | Parses an XML stanza into a (possible) XMPP message
 fromXml :: XmlElement -> Maybe Stanza
 fromXml element@(XmlElement nsStreams "stream" attribs _) = do
   to <- getAttribute nsJabber "to" element
@@ -74,26 +81,29 @@ fromXml element@(XmlElement nsStreams "stream" attribs _) = do
   ver <- readM verText
   return $ RxStreamOpen to ver
 
-fromXml element@(XmlElement nsSasl "auth" attribs children) = do 
+fromXml element@(XmlElement nsSasl "auth" attribs children) = do
   m <- getAttribute nsSasl "mechanism" element
   return $ AuthMechanism m
-  
-fromXml element@(XmlElement nsSasl "response" attribs children) = do 
+
+fromXml element@(XmlElement nsSasl "response" attribs children) = do
   let mchild = getChild element 0
   case mchild of
     Just (XmlText s) -> do
       bytes <- decode s
       return $ AuthResponse (toString $ pack bytes)
     Nothing -> return $ AuthResponse ""
-    
+
 --fromXml element@(XmlElement "" "iq")
-      
+
 fromXml element = Nothing
-  
+
+{- ------------------------------------------------------------------------- -}
+
+
 newAuthFailure :: String -> Stanza
 newAuthFailure f = Failure (nsSasl) child
  where child = newElement f
-  
+
 textFilter :: XmlElement -> Bool
 textFilter (XmlText _) = True
 textFilter _ = False

@@ -1,11 +1,11 @@
 all: 
-	ghc --make -hidir obj -odir obj -o bin/jhabber *.hs
+	ghc --make -hidir obj -odir obj -o bin/jhabber src/*.hs
 
 run: all
 	./bin/jhabber
 
 debug: all
-	ghci Main
+	ghci src/Main
 
 clean:
 	rm obj/*.o
