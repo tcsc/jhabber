@@ -1,4 +1,7 @@
 module XMPP ( Stanza(..),
+              IqAction(..),
+              IqTarget(..),
+              JID(JID),
               toXml,
               format,
               fromXml,
@@ -8,20 +11,22 @@ import Codec.Binary.Base64(encode, decode)
 import Data.ByteString(ByteString, pack, unpack)
 import Data.ByteString.UTF8(fromString, toString)
 import Data.Digest.MD5(hash)
+import Data.List
 
 import Xml
 import qualified XmlParse as XmlParse
 import Sasl
 import TextUtils
 
-data IqAction = Set
-              | Get
-              | Result
-              | Error
+-- | Represents a Jabber ID triplet of node, host and resource ID
+data JID = JID !String !String !String
+           deriving (Show)
+
+data IqAction = Set | Get | Result | Error
               deriving (Show)
 
--- | Represents a Jabber ID triplet of node, host and resource ID
-data JID = JID String String String
+data IqTarget = Resource JID
+                deriving (Show)
 
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
@@ -31,11 +36,12 @@ data Stanza = RxStreamOpen String Float
             | AuthResponse String
             | AuthSuccess
             | Failure String XmlElement
-            | Iq IqAction String
+            | Iq String IqAction IqTarget
             deriving (Show)
 
 nsJabber = "jabber:client"
 nsStreams = "http://etherx.jabber.org/streams"
+nsBind = "urn:ietf:params:xml:ns:xmpp-bind"
 
 namespaces :: [XmlAttribute]
 namespaces = [
@@ -56,7 +62,7 @@ format :: Stanza -> ByteString
 format (TxStreamOpen host connId) = fromString . formatShortElement $ txStreamStart host connId
 format stanza = fromString . formatElement False $ toXml stanza
 
-{- ------------------------------------------------------------------------- -}
+{- -------------------------------------------------------------------------- -}
 
 {-| Takes an XMPP message and formats it as an XML element -}
 toXml :: Stanza -> XmlElement
@@ -71,7 +77,7 @@ toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
 toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
 
-{- ------------------------------------------------------------------------- -}
+{- -------------------------------------------------------------------------- -}
 
 -- | Parses an XML stanza into a (possible) XMPP message
 fromXml :: XmlElement -> Maybe Stanza
@@ -93,12 +99,45 @@ fromXml element@(XmlElement nsSasl "response" attribs children) = do
       return $ AuthResponse (toString $ pack bytes)
     Nothing -> return $ AuthResponse ""
 
---fromXml element@(XmlElement "" "iq")
+fromXml element@(XmlElement nsJabber "iq" _ _) = do
+  action <- getAttribute nsJabber "type" element >>= parseIqType
+  id <- getAttribute nsJabber "id" element
+  target <- getChild element 1 >>= iqTargetFromXml
+  return $ Iq id action target
 
 fromXml element = Nothing
 
-{- ------------------------------------------------------------------------- -}
+{- -------------------------------------------------------------------------- -}
 
+iqTargetFromXml :: XmlElement -> Maybe IqTarget
+iqTargetFromXml xml@(XmlElement nsBind "bind" attrs children) = do
+  jid <- getChildText xml >>= parseJid
+  return $ Resource jid
+
+iqTargetFromXml _ = Nothing
+
+{- -------------------------------------------------------------------------- -}
+
+parseJid :: String -> Maybe JID
+parseJid s =
+  case elemIndex '@' s of
+    Nothing -> Nothing
+    Just n1 -> let node = take n1 s
+                   s' = drop (n1+1) s
+                   n2 = maybe (length s') id (elemIndex '/' s')
+               in Just $ JID node (take n2 s') (drop (n2 + 1) s')
+
+{- -------------------------------------------------------------------------- -}
+
+parseIqType :: String -> Maybe IqAction
+parseIqType s = case s of
+  "set" -> return Set
+  "get" -> return Get
+  "result" -> return Result
+  "error" -> return Error
+  _ -> Nothing
+
+{- -------------------------------------------------------------------------- -}
 
 newAuthFailure :: String -> Stanza
 newAuthFailure f = Failure (nsSasl) child

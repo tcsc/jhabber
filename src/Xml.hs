@@ -5,7 +5,8 @@ module Xml ( XmlElement(..),
              formatShortElement,
              newElement,
              getAttribute,
-             getChild ) where
+             getChild,
+             getChildText ) where
 
 
 import Data.List
@@ -38,6 +39,15 @@ getChild e@(XmlElement _ _ _ children) n =
     Just $ children !! n
   else
     Nothing
+
+-- | Fetches the text of the first child of the element, if (and only if) that
+--   child is a text node
+getChildText :: XmlElement -> Maybe String
+getChildText xml = do
+  child <- getChild xml 1
+  case child of
+    XmlText s -> return s
+    otherwise -> Nothing
 
 formatElements :: Bool -> [XmlElement] -> String
 formatElements short elems = (concat $ map (formatElement short) elems)
