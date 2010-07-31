@@ -6,6 +6,7 @@ module Sasl ( AuthInfo(None),
               checkResponse,
               checkCredentials,
               getUid,
+              isAuthenticated,
               nsSasl ) where
 
 import Control.Monad.Error  
@@ -35,7 +36,7 @@ data DigestState = Uninitialised
                  | Unauthenticated
                  | Pending
                  | Authenticated
-                 deriving (Show)
+                 deriving (Eq,Show)
 
 data AuthResponse = NeedsAuthentication
                   | Challenge String
@@ -69,7 +70,14 @@ type AuthResult = Either AuthFailure
 
 nsSasl :: String
 nsSasl = "urn:ietf:params:xml:ns:xmpp-sasl"
-              
+
+isAuthenticated :: AuthInfo -> Bool
+isAuthenticated (Digest _ _ _ _ _ _ _ _ _ state) = 
+  if state == Authenticated 
+    then True 
+    else False
+isAuthenticated _ = False
+
 newAuthInfo :: String -> String -> IO (Maybe AuthInfo)
 newAuthInfo "DIGEST-MD5" realm = do
   g <- newStdGen

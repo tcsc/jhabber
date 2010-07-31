@@ -166,6 +166,7 @@ nestedTag nst =
     let fullname = case namespace of "" -> name; _ -> namespace ++ ":" ++ name
     
     many space
+    
     subElements <- (try $ do {char '/'; char '>'; return []}) <|> do 
       char '>'
       elements <- many $ (try $ nestedTag nst') <|> (trim text)
@@ -174,6 +175,8 @@ nestedTag nst =
       string fullname
       char '>'
       return elements
+    
+    many space
     
     let! _ = debugM $ "before: " ++ (show attrs)
     

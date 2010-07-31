@@ -1,7 +1,7 @@
-module XMPP ( Stanza(..),
+module Xmpp ( Stanza(..),
               IqAction(..),
               IqTarget(..),
-              JID(JID),
+              JID(..),
               toXml,
               format,
               fromXml,
@@ -25,8 +25,9 @@ data JID = JID !String !String !String
 data IqAction = Set | Get | Result | Error
               deriving (Show)
 
-data IqTarget = Resource JID
-                deriving (Show)
+data IqTarget = None
+              | Resource String
+              deriving (Show)
 
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
@@ -110,10 +111,17 @@ fromXml element = Nothing
 {- -------------------------------------------------------------------------- -}
 
 iqTargetFromXml :: XmlElement -> Maybe IqTarget
-iqTargetFromXml xml@(XmlElement nsBind "bind" attrs children) = do
-  jid <- getChildText xml >>= parseJid
-  return $ Resource jid
-
+iqTargetFromXml xml@(XmlElement nsBind "bind" _ _) =
+    case getResourceName xml of
+      Just n -> Just $ Resource n
+      Nothing -> Just $ Xmpp.None
+  where 
+    getResourceName :: XmlElement -> Maybe String
+    getResourceName x = do 
+      child <- getNamedChild nsBind "resource" xml
+      name <- getChildText child
+      return name
+    
 iqTargetFromXml _ = Nothing
 
 {- -------------------------------------------------------------------------- -}

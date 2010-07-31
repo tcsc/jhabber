@@ -8,12 +8,12 @@ vpath %.hi $(OBJ)
 vpath %.hs $(SRC)
 
 jhabber:
-	ghc --make -hidir obj -odir obj -o bin/jhabber src/*.hs
+	ghc --make -isrc -hidir obj -odir obj -o bin/jhabber src/*.hs 
 
 #: $(OBJS)
 #	$(HC) -o $@ $< 
 
-run: all
+run: jhabber
 	./bin/jhabber
 
 debug: all

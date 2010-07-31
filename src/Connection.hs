@@ -31,7 +31,8 @@ import Text.ParserCombinators.Parsec.Error
 import Sasl
 import Xml
 import qualified XmlParse as XmlParse
-import qualified XMPP as Xmpp
+import qualified Xmpp as Xmpp
+import LocalRouter
 
 {-|
  A signal to the reader of what it should expect from the XML stream from next
@@ -94,12 +95,14 @@ type ReadResultIO a = ErrorT ReadFailure IO a
 
 data ConnFailure = AuthFailure
                  | UnsupportedMechanism
+                 | NotAuthenticated
                  deriving (Read, Show, Eq)
 instance Error ConnFailure where
   strMsg x = read x
 type ConnResult a = Either ConnFailure a
 type ConnResultIO a = ErrorT ConnFailure IO a
 
+localhost = "localhost"
 
 {- ------------------------------------------------------------------------- -}
 
@@ -267,7 +270,7 @@ handleInboundStanza (Xmpp.RxStreamOpen _ _) state = do
   debugM $ "received stream open block"
   let s = stateSocket state
   liftIO $ xmppSend s $ Xmpp.TxStreamOpen "localhost" (idNumber state)
-  liftIO $ xmppSend s $ xmppFeatures
+  liftIO $ xmppSend s $ (xmppFeatures (Connection.isAuthenticated state))
   return ([Ok, Connection.Expect Any], state)
 
 handleInboundStanza (Xmpp.AuthMechanism m) state = do
@@ -297,17 +300,29 @@ handleInboundStanza (Xmpp.AuthResponse r) state = do
     throwError e
 
 handleInboundStanza (Xmpp.Iq id action target) state = do
-  handleIq id action target state
+  (response, state') <- handleIq id action target state
+  liftIO $ xmppSend (stateSocket state) response
+  return ([Ok], state')
+
+{- -------------------------------------------------------------------------- -}
+
+uid :: ConnState -> String
+uid s = Sasl.getUid $ authInfo s
 
 {- -------------------------------------------------------------------------- -}
 
 handleIq :: String -> Xmpp.IqAction -> Xmpp.IqTarget -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
-handleIq id Xmpp.Set target state = throwError UnsupportedMechanism
-  
-{-  case target of
-    Xmpp.Resource jid -> do
-      Router.bindResource (router state) (getHandle state) jid
--}
+handleIq id Xmpp.Set target state = do
+  if not (Connection.isAuthenticated state)
+    then throwError NotAuthenticated
+    else do  
+      case target of
+        Xmpp.Resource n -> do
+          let jid = Xmpp.JID (uid state) localhost n
+          let handle = getHandle state
+          let rtr = router state
+          liftIO $ bindResource (router state) (getHandle state) jid
+          return (Xmpp.Iq id Xmpp.Result Xmpp.None, state)
 
 {- -------------------------------------------------------------------------- -}
 
@@ -341,6 +356,11 @@ authenticate state authInfo = do
 
 {- -------------------------------------------------------------------------- -}
 
+isAuthenticated :: ConnState -> Bool
+isAuthenticated s = Sasl.isAuthenticated $ authInfo s  
+
+{- -------------------------------------------------------------------------- -}
+
 getHandle :: ConnState -> Connection
 getHandle state = Conn (idNumber state) (msgQ state)
 
@@ -356,12 +376,23 @@ xmppSend socket stanza = do
   -- error handling goes here
   return ()
 
-xmppFeatures :: Xmpp.Stanza
-xmppFeatures = Xmpp.Features [
-  (XmlElement "" "bind" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-bind"] []),
-  (XmlElement "" "session" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-session"] []),
-  (XmlElement "" "mechanisms" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-sasl"] xmppMechanisms)
-  ]
+{- -------------------------------------------------------------------------- -}
+
+xmppFeatures :: Bool -> Xmpp.Stanza
+xmppFeatures authorized = 
+  Xmpp.Features $ mechanisms : features
+  where 
+    features = case authorized of 
+      True -> [
+        (XmlElement "" "bind" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-bind"] []),
+        (XmlElement "" "session" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-session"] [])]
+      False -> []
+    mechanisms = 
+      XmlElement "" "mechanisms" 
+        [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-sasl"]
+        xmppMechanisms
+
+{- -------------------------------------------------------------------------- -}
 
 xmppMechanisms :: [XmlElement]
 xmppMechanisms = [

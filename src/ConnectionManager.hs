@@ -12,7 +12,7 @@ import System.Log.Logger(debugM)
 import Connection(Connection, startConnection, connectionId)
 import LocalRouter
 import XmlParse
-import XMPP
+import Xmpp
 
 data MgrState = State { mgrConnections :: [Connection],
                         mgrIdSeed :: Integer }
