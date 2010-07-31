@@ -6,7 +6,9 @@ module Xml ( XmlElement(..),
              newElement,
              getAttribute,
              getChild,
-             getChildText ) where
+             getChildText,
+             getNamedChildren,
+             getNamedChild ) where
 
 
 import Data.List
@@ -39,6 +41,21 @@ getChild e@(XmlElement _ _ _ children) n =
     Just $ children !! n
   else
     Nothing
+
+getNamedChildren :: String -> String -> XmlElement -> [XmlElement]
+getNamedChildren ns n (XmlElement _ _ _ cs) =  filter (checkName ns n) cs
+  where
+    checkName :: String -> String -> XmlElement -> Bool
+    checkName ns n (XmlElement cns cn _ _) = (ns == cns) && (n == cn)
+    checkName _ _ _ = False
+  
+-- | 
+getNamedChild :: String -> String -> XmlElement -> Maybe XmlElement
+getNamedChild ns n xml = 
+  case getNamedChildren ns n xml of
+    [] -> Nothing
+    c -> Just $ head c
+
 
 -- | Fetches the text of the first child of the element, if (and only if) that
 --   child is a text node

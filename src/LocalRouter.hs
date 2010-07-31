@@ -1,16 +1,18 @@
 module LocalRouter (Router,
                     newRouter,
                     stopRouter,
+                    bindResource,
                     crashRouter) where
 
 import Prelude hiding (catch)
 import Data.List
+import qualified Data.Map as Map
 import Control.Monad
 import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
 import Control.Concurrent.STM
 import qualified Control.Exception as E
 import System.Log.Logger
-import XMPP(JID)
+import Xmpp(JID(..))
 import {-# SOURCE #-} Connection
 
 data Message = MsgDummy
@@ -23,17 +25,21 @@ data RouterMsg = Quit
 
 type CommandQueue = TChan RouterMsg
 type MessageQueue = TChan Message
+type Registration = Map.Map String Connection
+type RoutingTable = Map.Map String Registration
+type RoutingTableVar = TVar RoutingTable
 
 data Router = MkRouter {
   rtrMsgQ :: MessageQueue,
   rtrCmdQ :: CommandQueue,
-  rtrThread :: ThreadId
+  rtrTable :: RoutingTableVar
 }
 
 data RouterState = State {
   stateMsgQ :: MessageQueue,
   stateCmdQ :: CommandQueue,
-  stateWorkers :: [ThreadId]
+  stateWorkers :: [ThreadId],
+  stateTable :: RoutingTableVar
 }
 
 {- -------------------------------------------------------------------------- -}
@@ -42,8 +48,9 @@ newRouter :: Int -> IO Router
 newRouter nThreads = do
   msgQ <- newTChanIO -- :: (Chan Message)
   cmdQ <- newTChanIO
-  t <- forkIO $ routerMain nThreads cmdQ msgQ
-  return $ MkRouter { rtrMsgQ = msgQ, rtrCmdQ = cmdQ, rtrThread = t }
+  t <- newTVarIO $ Map.empty 
+  forkIO $ routerMain nThreads cmdQ msgQ t
+  return $ MkRouter { rtrMsgQ = msgQ, rtrCmdQ = cmdQ, rtrTable = t }
 
 {- -------------------------------------------------------------------------- -}
 
@@ -56,9 +63,27 @@ stopRouter r = do
 
 {- -------------------------------------------------------------------------- -}
 
-bindResource :: Connection -> JID -> IO ()
-bindResource conn jid = do
+-- | todo: handle the case where the resource is already bound to to another
+--         connection
+bindResource :: Router -> Connection -> JID -> IO ()
+bindResource r conn jid@(JID node host resource) = do
+  atomically $ do
+    table <- readTVar $ rtrTable r
+    
+    let reg    = getRegistration jid table
+        reg'   = Map.insert resource conn reg
+        table' = Map.insert node reg' table
+        
+    writeTVar (rtrTable r) $! table'
   return ()
+
+{- -------------------------------------------------------------------------- -}
+  
+getRegistration :: JID -> RoutingTable -> Registration
+getRegistration jid@(JID node _ _) table = 
+  case Map.lookup node table of
+    Just reg -> reg
+    Nothing -> Map.empty
 
 {- -------------------------------------------------------------------------- -}
 
@@ -69,11 +94,14 @@ crashRouter r = do
 
 {- -------------------------------------------------------------------------- -}
 
-routerMain :: Int -> CommandQueue -> MessageQueue -> IO ()
-routerMain nThreads cmdQ msgQ = do
+routerMain :: Int -> CommandQueue -> MessageQueue -> RoutingTableVar -> IO ()
+routerMain nThreads cmdQ msgQ rTable = do
   debug "Starting new local router thread"
   ts <- mapM (\_ -> forkWorker cmdQ msgQ) [1..nThreads]
-  loop State { stateCmdQ = cmdQ, stateMsgQ = msgQ, stateWorkers = ts  }
+  loop State { stateCmdQ = cmdQ, 
+               stateMsgQ = msgQ, 
+               stateWorkers = ts, 
+               stateTable = rTable }
     where
       loop :: RouterState -> IO ()
       loop state = do cmd <- atomically $ readTChan cmdQ
