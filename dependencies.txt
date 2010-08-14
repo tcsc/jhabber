@@ -1,0 +1,7 @@
+hslogger
+network-bytestring
+utf8-string
+MaybeT
+hex
+pureMD5
+dataenc
