@@ -30,7 +30,6 @@ import System.Log.Logger(debugM)
 import System.IO.Unsafe
 
 import TextUtils
---import EitherM
 
 data DigestState = Uninitialised
                  | Unauthenticated

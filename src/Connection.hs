@@ -96,6 +96,7 @@ type ReadResultIO a = ErrorT ReadFailure IO a
 data ConnFailure = AuthFailure
                  | UnsupportedMechanism
                  | NotAuthenticated
+                 | XmppFailure
                  deriving (Read, Show, Eq)
 instance Error ConnFailure where
   strMsg x = read x
@@ -312,7 +313,7 @@ uid s = Sasl.getUid $ authInfo s
 {- -------------------------------------------------------------------------- -}
 
 handleIq :: String -> Xmpp.IqAction -> Xmpp.IqTarget -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
-handleIq id Xmpp.Set target state = do
+handleIq rid Xmpp.Set target state = do
   if not (Connection.isAuthenticated state)
     then throwError NotAuthenticated
     else do  
@@ -322,7 +323,8 @@ handleIq id Xmpp.Set target state = do
           let handle = getHandle state
           let rtr = router state
           liftIO $ bindResource (router state) (getHandle state) jid
-          return (Xmpp.Iq id Xmpp.Result Xmpp.None, state)
+          return (Xmpp.Iq rid Xmpp.Result Xmpp.None, state)
+        _ -> throwError XmppFailure
 
 {- -------------------------------------------------------------------------- -}
 

@@ -10,7 +10,6 @@ module Xmpp ( Stanza(..),
 import Codec.Binary.Base64(encode, decode)
 import Data.ByteString(ByteString, pack, unpack)
 import Data.ByteString.UTF8(fromString, toString)
-import Data.Digest.MD5(hash)
 import Data.List
 
 import Xml
