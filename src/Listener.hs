@@ -14,7 +14,9 @@ data Listener = MkListener Socket ThreadId
 
 startlistener :: (Socket -> IO ()) -> PortNumber -> IO Listener
 startlistener f port = do
-  s <- createSocket iNADDR_ANY 4321
+  debug $ "Creating listener socket for port " ++ (show port)
+  s <- createSocket iNADDR_ANY port
+  debug $ "Starting listner on port " ++ (show port)
   t <- forkIO $ listener s f port
   return (MkListener s t)
 

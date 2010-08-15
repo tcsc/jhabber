@@ -35,6 +35,7 @@ getAttribute nameSpace name (XmlElement _ _ attributes _) = do
   attrib <- find (\(XmlAttribute ns n _) ->ns == nameSpace && n == name) attributes
   return $ attrValue attrib
 
+-- | get the n'th child of the xml element, where n is a 0-based index
 getChild :: XmlElement -> Int -> Maybe XmlElement
 getChild e@(XmlElement _ _ _ children) n =
   if (length children) > n then
@@ -48,10 +49,10 @@ getNamedChildren ns n (XmlElement _ _ _ cs) =  filter (checkName ns n) cs
     checkName :: String -> String -> XmlElement -> Bool
     checkName ns n (XmlElement cns cn _ _) = (ns == cns) && (n == cn)
     checkName _ _ _ = False
-  
--- | 
+
+-- |
 getNamedChild :: String -> String -> XmlElement -> Maybe XmlElement
-getNamedChild ns n xml = 
+getNamedChild ns n xml =
   case getNamedChildren ns n xml of
     [] -> Nothing
     c -> Just $ head c
@@ -61,7 +62,7 @@ getNamedChild ns n xml =
 --   child is a text node
 getChildText :: XmlElement -> Maybe String
 getChildText xml = do
-  child <- getChild xml 1
+  child <- getChild xml 0
   case child of
     XmlText s -> return s
     otherwise -> Nothing

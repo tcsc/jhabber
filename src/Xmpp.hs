@@ -18,14 +18,25 @@ import Sasl
 import TextUtils
 
 -- | Represents a Jabber ID triplet of node, host and resource ID
-data JID = JID !String !String !String
-           deriving (Show)
+data JID = JID { jidName :: !String,
+                 jidHost :: !String,
+                 jidResource :: !String }
+           deriving (Eq)
+
+instance Show JID where
+  show (JID n h r) = n ++ "@" ++ h ++ "/" ++ r
 
 data IqAction = Set | Get | Result | Error
-              deriving (Show)
+instance Show IqAction where
+  show n = case n of
+            Set -> "set"
+            Get -> "get"
+            Result -> "result"
+            Error -> "error"
 
 data IqTarget = None
-              | Resource String
+              | BindResource (Maybe String)
+              | BoundJid JID
               deriving (Show)
 
 data Stanza = RxStreamOpen String Float
@@ -74,6 +85,11 @@ toXml (AuthChallenge c) = XmlElement "" "challenge"
 
 toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
 
+toXml (Iq rid action t) =
+  let attrs = [XmlAttribute "" "type" (show action), XmlAttribute "" "id" rid]
+      target = iqTargetToXml t
+  in  XmlElement "" "iq" attrs [target]
+
 toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
 
@@ -102,7 +118,7 @@ fromXml element@(XmlElement nsSasl "response" attribs children) = do
 fromXml element@(XmlElement nsJabber "iq" _ _) = do
   action <- getAttribute nsJabber "type" element >>= parseIqType
   id <- getAttribute nsJabber "id" element
-  target <- getChild element 1 >>= iqTargetFromXml
+  target <- getChild element 0 >>= iqTargetFromXml
   return $ Iq id action target
 
 fromXml element = Nothing
@@ -111,17 +127,22 @@ fromXml element = Nothing
 
 iqTargetFromXml :: XmlElement -> Maybe IqTarget
 iqTargetFromXml xml@(XmlElement nsBind "bind" _ _) =
-    case getResourceName xml of
-      Just n -> Just $ Resource n
-      Nothing -> Just $ Xmpp.None
-  where 
+  Just (BindResource $ getResourceName xml)
+  where
     getResourceName :: XmlElement -> Maybe String
-    getResourceName x = do 
+    getResourceName x = do
       child <- getNamedChild nsBind "resource" xml
       name <- getChildText child
       return name
-    
+
 iqTargetFromXml _ = Nothing
+
+{- -------------------------------------------------------------------------- -}
+
+iqTargetToXml :: IqTarget -> XmlElement
+iqTargetToXml (BoundJid jid) =
+  let resource = XmlElement "" "resource" [] [XmlText (show jid)] in
+  XmlElement "" "bind" [XmlAttribute "" "xmlns" nsBind] [resource]
 
 {- -------------------------------------------------------------------------- -}
 
