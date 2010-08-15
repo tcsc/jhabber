@@ -1,5 +1,5 @@
 module Main where
-  
+
 import IO
 import Control.Concurrent
 import Network
@@ -9,12 +9,12 @@ import System.Log.Handler.Simple
 
 import ConnectionManager
 import Listener
-import LocalRouter 
+import LocalRouter
 
-data State = State { 
+data State = State {
   stateRouter :: Router,
   stateManager :: ConnectionManager,
-  stateListeners :: [Listener] 
+  stateListeners :: [Listener]
 }
 
 main :: IO ()
@@ -22,13 +22,13 @@ main = withSocketsDo $ do
   updateGlobalLogger rootLoggerName (setLevel DEBUG)
   vl <- verboseStreamHandler stdout DEBUG
   updateGlobalLogger rootLoggerName (setHandlers [vl])
-  
+
   debug "Entering main"
   r <- newRouter 4
   mgr <- newConnectionManager r
-  l <- startlistener (newConnection mgr) 4321  
+  l <- startlistener (newConnection mgr) 4321
   mainloop State { stateRouter = r, stateManager = mgr, stateListeners = [l] }
-  
+
 mainloop :: State -> IO ()
 mainloop s = do
   threadDelay 1000
@@ -41,7 +41,7 @@ mainloop s = do
               mainloop s
     _   -> mainloop s
     -}
-    
+
 newConnection :: ConnectionManager -> Socket -> IO ()
 newConnection mgr s = do
   debug "new connection" -- conn <- newConnection s
@@ -49,8 +49,8 @@ newConnection mgr s = do
   return ()
 
 shutdown :: State -> IO ()
-shutdown s = do 
+shutdown s = do
   stopRouter $ stateRouter s
-  return () 
+  return ()
 
-debug = debugM "main" 
+debug = debugM "main"

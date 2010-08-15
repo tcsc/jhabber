@@ -1,4 +1,4 @@
-{- An XML parser based on the XMPP client library's parser that can parse XML chunks 
+{- An XML parser based on the XMPP client library's parser that can parse XML chunks
    without requiring the whole document
 -}
 
@@ -16,7 +16,7 @@ module XmlParse ( Context,
                   simpleTag,
                   trim,
                   getRemainder) where
-  
+
 import Text.ParserCombinators.Parsec
 import qualified Text.ParserCombinators.Parsec as Parsec
 import Text.ParserCombinators.Parsec.Char
@@ -40,7 +40,7 @@ data XmlFailure = InsufficientData
                 | ParseFailure
                 | Fail String
                 deriving (Read, Show, Eq)
-                
+
 instance Error XmlFailure where
   strMsg = Fail
 
@@ -56,16 +56,16 @@ newContext = Ctx Map.empty
 parsePreamble :: String -> XmlResult (String, XmlElement)
 parsePreamble text = do
   case Parsec.parse (getRemainder $ trim $ preamble) "" text of
-    Right (xml, remainder) -> 
+    Right (xml, remainder) ->
       case xml of
         (XmlProcessingInstruction s) -> return (remainder, xml)
         _ -> throwError NoMorePreamble
-        
+
     Left err -> case head (errorMessages err) of
       -- simple out-of-data error. No biggie, just go around and try again
       SysUnExpect [] -> throwError InsufficientData
-        
-      -- full-on parse failure... we should do something here 
+
+      -- full-on parse failure... we should do something here
       _ -> throwError ParseFailure
 
 {- ------------------------------------------------------------------------- -}
@@ -77,14 +77,14 @@ parseNestedTag (Ctx nsTable) text =
     Left err -> case head (errorMessages err) of
       -- simple out-of-data error. No biggie, just go around and try again
       SysUnExpect [] -> throwError InsufficientData
-        
-      -- full-on parse failure... we should do something here 
+
+      -- full-on parse failure... we should do something here
       _ -> throwError ParseFailure
 
 {- ------------------------------------------------------------------------- -}
 
 parseStartTag :: Context -> String -> XmlResult (String, XmlElement, Context)
-parseStartTag ctx@(Ctx nst) text = 
+parseStartTag ctx@(Ctx nst) text =
   case Parsec.parse (getRemainder $ trim simpleTag) "" text of
     Right ((nst', xml), remainder) -> do
       let nst'' = Map.union nst nst'
@@ -93,50 +93,50 @@ parseStartTag ctx@(Ctx nst) text =
     Left err -> case head (errorMessages err) of
       -- simple out-of-data error. No biggie, just go around and try again
       SysUnExpect [] -> throwError InsufficientData
-        
-      -- full-on parse failure... we should do something here 
+
+      -- full-on parse failure... we should do something here
       _ -> throwError ParseFailure
 
 {- ------------------------------------------------------------------------- -}
 
 {-
 parse :: Context -> String -> Parser XmlElement -> XmlResult (String, XmlElement, Context)
-parse (Ctx nsTable) text p = 
+parse (Ctx nsTable) text p =
   case Parsec.parse (XmlParse.getRemainder p) "" text of
     Right (xml, remainder) -> do
       let nsTable' = updateNsTable nsTable xml
           xml' = canonicalizeNames nsTable' xml
           ctx' = Ctx nsTable'
       return (remainder, xml', ctx')
-      
+
     Left err -> case head (errorMessages err) of
       -- simple out-of-data error. No biggie, just go around and try again
       SysUnExpect [] -> throwError InsufficientData
-        
-      -- full-on parse failure... we should do something here 
+
+      -- full-on parse failure... we should do something here
       _ -> throwError ParseFailure
 -}
 
 {- ------------------------------------------------------------------------- -}
 
 updateNsTable :: NsTable -> [XmlAttribute] -> NsTable
-updateNsTable nsTable [] = nsTable 
+updateNsTable nsTable [] = nsTable
 updateNsTable nsTable as =  foldl' extractNs nsTable as
   where extractNs :: NsTable -> XmlAttribute -> NsTable
-        extractNs t (XmlAttribute ns n v) = 
-          if n == "xmlns" 
+        extractNs t (XmlAttribute ns n v) =
+          if n == "xmlns"
             then Map.insert "" v t
             else if ns == "xmlns"
-              then Map.insert n v t 
+              then Map.insert n v t
               else t
-  
+
 {- ------------------------------------------------------------------------- -}
 
 canonicalizeNames :: NsTable -> XmlElement -> XmlElement
 canonicalizeNames nsMap (XmlElement ns n attribs children) =
   XmlElement ns' n attribs' kids'
   where ns' = lookupNs nsMap ns
-        kids' = map (canonicalizeNames nsMap) children 
+        kids' = map (canonicalizeNames nsMap) children
         attribs' = map cAttrib attribs
         cAttrib (XmlAttribute ns n v) = XmlAttribute (lookupNs nsMap ns) n v
 
@@ -160,14 +160,14 @@ nestedTags :: NsTable -> Parser [XmlElement]
 nestedTags nst = many $ nestedTag nst
 
 nestedTag :: NsTable -> Parser XmlElement
-nestedTag nst = 
+nestedTag nst =
   do
     (nst', (XmlElement namespace name attrs _)) <- tagStart nst
     let fullname = case namespace of "" -> name; _ -> namespace ++ ":" ++ name
-    
+
     many space
-    
-    subElements <- (try $ do {char '/'; char '>'; return []}) <|> do 
+
+    subElements <- (try $ do {char '/'; char '>'; return []}) <|> do
       char '>'
       elements <- many $ (try $ nestedTag nst') <|> (trim text)
       char '<'
@@ -175,28 +175,28 @@ nestedTag nst =
       string fullname
       char '>'
       return elements
-    
+
     many space
-    
-    let! _ = debugM $ "before: " ++ (show attrs)
-    
+
+ --   let! _ = debugM $ "before: " ++ (show attrs)
+
     let attrs' = foldl' (filterAttribs nst') [] attrs
     let namespace' = (nsLookup nst' namespace)
 
-    let! _ = debugM $ "after: " ++ (show attrs')
-  
+ --   let! _ = debugM $ "after: " ++ (show attrs')
+
     return $ XmlElement namespace' name attrs' subElements
 
 filterAttribs :: NsTable -> [XmlAttribute] -> XmlAttribute -> [XmlAttribute]
-filterAttribs nst acc (XmlAttribute ns n v) = 
-  if ns == "xmlns" || n == "xmlns" 
+filterAttribs nst acc (XmlAttribute ns n v) =
+  if ns == "xmlns" || n == "xmlns"
     then acc
     else (XmlAttribute (nsLookup nst ns) n v) : acc
-  
+
 {- ------------------------------------------------------------------------- -}
-  
+
 simpleTag :: Parser (NsTable, XmlElement)
-simpleTag = do 
+simpleTag = do
   (nst, tag) <- tagStart Map.empty
   char '>'
   return (nst, tag)
@@ -224,7 +224,7 @@ text = do
             "apos" -> '\''
 
 {- ------------------------------------------------------------------------- -}
-  
+
 tagStart :: NsTable -> Parser (NsTable, XmlElement)
 tagStart nst = do
   char '<'
@@ -237,21 +237,21 @@ tagStart nst = do
 
 attributes :: NsTable -> Parser (NsTable, [XmlAttribute])
 attributes nst = do
-    as <- many $ do 
+    as <- many $ do
       (nsEntry, attr) <- attribute
-      many space 
+      many space
       return (nsEntry, attr)
     return $ foldl' unpack (nst, []) as
   where
-    unpack :: (NsTable, [XmlAttribute]) -> 
-              (Maybe (String, String), XmlAttribute) -> 
+    unpack :: (NsTable, [XmlAttribute]) ->
+              (Maybe (String, String), XmlAttribute) ->
               (NsTable, [XmlAttribute])
-    unpack (nst, attrs) (maybeNs, attr) = 
+    unpack (nst, attrs) (maybeNs, attr) =
       let nst' = maybe nst (\(s,l) -> Map.insert s l nst) maybeNs
       in (nst', attr : attrs)
-        
+
 {- ------------------------------------------------------------------------- -}
-  
+
 attribute :: Parser (Maybe (String, String), XmlAttribute)
 attribute = do
     (ns, name) <- elementName
@@ -259,33 +259,33 @@ attribute = do
     quote <- char '\'' <|> char '"'
     value <- many1 $ satisfy (/= quote)
     char quote
-        
+
     return (nsEntry ns name value, XmlAttribute ns name value)
   where
     nsEntry :: String -> String -> String -> Maybe(String, String)
     nsEntry ns "xmlns" v = Just ("", v)
     nsEntry "xmlns" n v = Just (n, v)
     nsEntry _ _ _ = Nothing
-    
+
 {- ------------------------------------------------------------------------- -}
-    
+
 elementName :: Parser (String, String)
-elementName = do 
+elementName = do
   namespace <- (try namespace) <|> string ""
   name <- many1 tokenChar
   return (namespace, name)
-  
+
 namespace :: Parser String
 namespace = do
   x <- many tokenChar
   char ':'
   return x
-  
+
 tokenChar :: Parser Char
 tokenChar = letter <|> char '-'
 
 trim :: Parser a -> Parser a
-trim p = do 
+trim p = do
   spaces
   x <- p
   spaces
@@ -301,10 +301,10 @@ preamble :: Parser XmlElement
 preamble = (try processingInstruction) <|> do
   (_,xml) <- simpleTag
   return xml
-  
+
 processingInstructions :: Parser ([XmlElement])
 processingInstructions = many processingInstruction
-  
+
 processingInstruction :: Parser XmlElement
 processingInstruction = do
   char '<'
@@ -313,5 +313,5 @@ processingInstruction = do
   char '?'
   char '>'
   return $ XmlProcessingInstruction text
-  
+
 debugM = unsafePerformIO . Log.debugM "xml"

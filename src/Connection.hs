@@ -97,6 +97,9 @@ data ConnFailure = AuthFailure
                  | UnsupportedMechanism
                  | NotAuthenticated
                  | XmppFailure
+                 | Timeout
+                 | Unsupported
+                 | UnknownFailure
                  deriving (Read, Show, Eq)
 instance Error ConnFailure where
   strMsg x = read x
@@ -239,7 +242,9 @@ processStanza q state@(ReaderState _ _ _ expected ctx) xml = do
     -- this is just an xml-to-xmpp translation failure, which shouldn't
     -- necessarily be a fatal error... just return the existing state and carry
     -- on
-    Nothing -> return state
+    Nothing -> do
+      debugM $ "XMPP parse failure for XML " ++ (show xml)
+      return state
   where
     processResponse :: ReaderState -> [Response] -> ReaderState
     processResponse s r = foldl' updateState s r
@@ -301,6 +306,7 @@ handleInboundStanza (Xmpp.AuthResponse r) state = do
     throwError e
 
 handleInboundStanza (Xmpp.Iq id action target) state = do
+  debugM $ "IQ"
   (response, state') <- handleIq id action target state
   liftIO $ xmppSend (stateSocket state) response
   return ([Ok], state')
@@ -314,17 +320,37 @@ uid s = Sasl.getUid $ authInfo s
 
 handleIq :: String -> Xmpp.IqAction -> Xmpp.IqTarget -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
 handleIq rid Xmpp.Set target state = do
+  debugM "Handling IQ Set"
   if not (Connection.isAuthenticated state)
     then throwError NotAuthenticated
-    else do  
+    else do
       case target of
-        Xmpp.Resource n -> do
-          let jid = Xmpp.JID (uid state) localhost n
+        Xmpp.BindResource n -> do
+          let resourceName = maybe "default" id n
+          let jid = Xmpp.JID (uid state) localhost resourceName
           let handle = getHandle state
-          let rtr = router state
-          liftIO $ bindResource (router state) (getHandle state) jid
-          return (Xmpp.Iq rid Xmpp.Result Xmpp.None, state)
-        _ -> throwError XmppFailure
+
+          debugM $ "Binding connection to jid " ++ (show jid)
+
+          jid' <- liftRouterIO $ bindResource (router state) (getHandle state) jid
+          return (Xmpp.Iq rid Xmpp.Result (Xmpp.BoundJid jid'), state)
+        _ -> throwError Unsupported
+
+liftRouterIO :: LocalRouter.ResultIO a -> ConnResultIO a
+liftRouterIO = mapErrorT translateResult
+  where
+    translateResult :: IO (Either LocalRouter.Failure a) -> IO (Either ConnFailure a)
+    translateResult rval = do
+      rval' <- rval
+      case rval' of
+        Right x -> return $ Right x
+        Left err -> return (Left $ translate err)
+
+    translate :: LocalRouter.Failure -> ConnFailure
+    translate f =
+      if f == LocalRouter.Timeout
+        then Connection.Timeout
+        else UnknownFailure
 
 {- -------------------------------------------------------------------------- -}
 
@@ -359,7 +385,7 @@ authenticate state authInfo = do
 {- -------------------------------------------------------------------------- -}
 
 isAuthenticated :: ConnState -> Bool
-isAuthenticated s = Sasl.isAuthenticated $ authInfo s  
+isAuthenticated s = Sasl.isAuthenticated $ authInfo s
 
 {- -------------------------------------------------------------------------- -}
 
@@ -381,16 +407,16 @@ xmppSend socket stanza = do
 {- -------------------------------------------------------------------------- -}
 
 xmppFeatures :: Bool -> Xmpp.Stanza
-xmppFeatures authorized = 
+xmppFeatures authorized =
   Xmpp.Features $ mechanisms : features
-  where 
-    features = case authorized of 
+  where
+    features = case authorized of
       True -> [
         (XmlElement "" "bind" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-bind"] []),
         (XmlElement "" "session" [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-session"] [])]
       False -> []
-    mechanisms = 
-      XmlElement "" "mechanisms" 
+    mechanisms =
+      XmlElement "" "mechanisms"
         [XmlAttribute "" "xmlns" "urn:ietf:params:xml:ns:xmpp-sasl"]
         xmppMechanisms
 
