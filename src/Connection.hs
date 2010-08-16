@@ -73,7 +73,8 @@ data ConnState = State { idNumber :: Integer,
                          router :: Router,
                          onLostCB :: Callback,
                          msgQ :: ConnMsgQ,
-                         authInfo :: AuthInfo }
+                         authInfo :: AuthInfo,
+                         stateJid :: Xmpp.JID }
 
 data ReaderState = ReaderState { rdrCondVar :: ResponseVar,
                                  rdrPipeline :: Bool,
@@ -119,7 +120,8 @@ startConnection r cId s onLost = do
                       router = r,
                       msgQ = q,
                       onLostCB = onLost,
-                      authInfo = None }
+                      authInfo = None,
+                      stateJid = (Xmpp.JID "" "" "") }
   forkIO $ runConnection state
   return c
 
@@ -307,9 +309,12 @@ handleInboundStanza (Xmpp.AuthResponse r) state = do
 
 handleInboundStanza (Xmpp.Iq id action target) state = do
   debugM $ "IQ"
-  (response, state') <- handleIq id action target state
-  liftIO $ xmppSend (stateSocket state) response
-  return ([Ok], state')
+  if not (Connection.isAuthenticated state)
+    then throwError NotAuthenticated
+    else do
+      (response, state') <- handleIq id action target state
+      liftIO $ xmppSend (stateSocket state) response
+      return ([Ok], state')
 
 {- -------------------------------------------------------------------------- -}
 
@@ -319,23 +324,22 @@ uid s = Sasl.getUid $ authInfo s
 {- -------------------------------------------------------------------------- -}
 
 handleIq :: String -> Xmpp.IqAction -> Xmpp.IqTarget -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
-handleIq rid Xmpp.Set target state = do
-  debugM "Handling IQ Set"
-  if not (Connection.isAuthenticated state)
-    then throwError NotAuthenticated
-    else do
-      case target of
-        Xmpp.BindResource n -> do
-          let resourceName = maybe "default" id n
-          let jid = Xmpp.JID (uid state) localhost resourceName
-          let handle = getHandle state
+handleIq rid Xmpp.Set (Xmpp.BindResource n) state = do
+  let resourceName = maybe "default" id n
+  let jid = Xmpp.JID (uid state) localhost resourceName
+  let handle = getHandle state
+  jid' <- liftRouterIO $ bindResource (router state) (getHandle state) jid
+  let state' = state { stateJid = jid' }
+  return (Xmpp.Iq rid Xmpp.Result (Xmpp.BoundJid jid'), state')
 
-          debugM $ "Binding connection to jid " ++ (show jid)
+handleIq rid Xmpp.Set Xmpp.Session state = do
+  liftRouterIO $ activateSession (router state) (stateJid state)
+  return (Xmpp.Iq rid Xmpp.Result Xmpp.None, state)
 
-          jid' <- liftRouterIO $ bindResource (router state) (getHandle state) jid
-          return (Xmpp.Iq rid Xmpp.Result (Xmpp.BoundJid jid'), state)
-        _ -> throwError Unsupported
+{- -------------------------------------------------------------------------- -}
 
+-- | Lifts a router result into the connection result monad by translating the
+--   router failure code into the appropriate connection result code
 liftRouterIO :: LocalRouter.ResultIO a -> ConnResultIO a
 liftRouterIO = mapErrorT translateResult
   where

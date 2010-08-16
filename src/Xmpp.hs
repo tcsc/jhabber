@@ -27,6 +27,8 @@ instance Show JID where
   show (JID n h r) = n ++ "@" ++ h ++ "/" ++ r
 
 data IqAction = Set | Get | Result | Error
+  deriving (Eq)
+
 instance Show IqAction where
   show n = case n of
             Set -> "set"
@@ -37,7 +39,8 @@ instance Show IqAction where
 data IqTarget = None
               | BindResource (Maybe String)
               | BoundJid JID
-              deriving (Show)
+              | Session
+              deriving (Show, Eq)
 
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
@@ -48,11 +51,12 @@ data Stanza = RxStreamOpen String Float
             | AuthSuccess
             | Failure String XmlElement
             | Iq String IqAction IqTarget
-            deriving (Show)
+            deriving (Show, Eq)
 
 nsJabber = "jabber:client"
 nsStreams = "http://etherx.jabber.org/streams"
 nsBind = "urn:ietf:params:xml:ns:xmpp-bind"
+nsSession = "urn:ietf:params:xml:ns:xmpp-session"
 
 namespaces :: [XmlAttribute]
 namespaces = [
@@ -68,7 +72,8 @@ txStreamStart rx sId =
       (XmlAttribute "" "id" $ show sId),
       (XmlAttribute "" "version" "1.0") ])]
 
-{-| Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8 encoded XML -}
+-- | Takes an XMPP message and formats it as a chunk of ready-to-send UTF-8
+--   encoded XML
 format :: Stanza -> ByteString
 format (TxStreamOpen host connId) = fromString . formatShortElement $ txStreamStart host connId
 format stanza = fromString . formatElement False $ toXml stanza
@@ -135,6 +140,8 @@ iqTargetFromXml xml@(XmlElement nsBind "bind" _ _) =
       name <- getChildText child
       return name
 
+iqTargetFromXml xml@(XmlElement nsSession "session" _ _)  = Just Session
+
 iqTargetFromXml _ = Nothing
 
 {- -------------------------------------------------------------------------- -}
@@ -170,6 +177,8 @@ parseIqType s = case s of
 newAuthFailure :: String -> Stanza
 newAuthFailure f = Failure (nsSasl) child
  where child = newElement f
+
+{- -------------------------------------------------------------------------- -}
 
 textFilter :: XmlElement -> Bool
 textFilter (XmlText _) = True
