@@ -4,6 +4,7 @@ module LocalRouter (Router,
                     newRouter,
                     stopRouter,
                     bindResource,
+                    activateSession,
                     crashRouter) where
 
 import Control.Monad.Error
@@ -20,6 +21,7 @@ import Xmpp(JID(..))
 import {-# SOURCE #-} Connection
 
 data Failure = Timeout
+             | NotFound
   deriving (Eq, Show, Read)
 
 instance Error Failure where
@@ -27,6 +29,7 @@ instance Error Failure where
 
 data Reply = RpyBound JID
            | RpyError Failure
+           | RpyOK
   deriving (Eq, Show)
 
 {-| A signal used send a response back to a waiting client -}
@@ -36,6 +39,7 @@ type ReplyVar = TMVar Reply
 data Message = MsgDummy
              | MsgCrash
              | MsgBind Connection JID ReplyVar
+             | MsgActivateSession JID ReplyVar
 
 {-| The messages that the router manager thread can handle -}
 data RouterMsg = Quit
@@ -48,7 +52,20 @@ type ResultIO a = ErrorT Failure IO a
 
 type CommandQueue = TChan RouterMsg
 type MessageQueue = TChan Message
-type Registration = Map.Map String Connection
+
+-- | Holds the details of a bound resource
+data Resource = Resource {
+  resId :: JID,
+  resConn :: Connection,
+  resActive :: Bool
+}
+
+-- | Holds a mapping between a single user login and the various resources bound
+--   to that login. The map is indexed by the resource id.
+type Registration = Map.Map String Resource
+
+-- | Holds a mapping between logged in users and the resource maps to their
+--   bound resources
 type RoutingTable = Map.Map String Registration
 type RoutingTableVar = TVar RoutingTable
 
@@ -102,6 +119,15 @@ bindResource r conn jid = do
 
 {- -------------------------------------------------------------------------- -}
 
+activateSession :: Router -> JID -> ResultIO ()
+activateSession r jid = do
+  replyVar <- liftIO $ newReplyVar
+  reply <- sendMessageAndWait r (MsgActivateSession jid replyVar) replyVar 1000
+  case reply of
+    RpyOK -> return ()
+
+{- -------------------------------------------------------------------------- -}
+
 sendMessageAndWait :: Router -> Message -> ReplyVar -> Int -> ResultIO Reply
 sendMessageAndWait rtr msg rpyVar t = do
   let q = rtrMsgQ rtr
@@ -113,15 +139,26 @@ sendMessageAndWait rtr msg rpyVar t = do
 
 {- -------------------------------------------------------------------------- -}
 
-getRegistration :: JID -> RoutingTable -> Registration
-getRegistration (JID node _ _) table =
-  case Map.lookup node table of
-    Just reg -> reg
-    Nothing -> Map.empty
+newRegistration :: Registration
+newRegistration = Map.empty
+
+getRegistration :: JID -> RoutingTable -> Maybe Registration
+getRegistration (JID node _ _) table = Map.lookup node table
 
 setRegistration :: JID -> Registration -> RoutingTable -> RoutingTable
 setRegistration (JID node _ _) reg table =
   Map.insert node reg table
+
+lookupResource :: JID -> RoutingTable -> Maybe (Registration, Resource)
+lookupResource jid@(JID node _ rid) table = do
+  reg <- getRegistration jid table
+  res <- Map.lookup rid reg
+  return (reg, res)
+
+updateResource :: JID -> Registration -> Resource -> RoutingTable -> RoutingTable
+updateResource jid reg res table =
+  let reg' = Map.insert (jidResource jid) res reg
+  in setRegistration jid reg' table
 
 {- -------------------------------------------------------------------------- -}
 
@@ -199,13 +236,27 @@ handleMsg :: Router -> Message -> IO ()
 
 -- Binds a connection to a jabber ID in the routing table
 handleMsg r (MsgBind conn jid replyVar) = do
+  let res = Resource {resId = jid, resConn = conn, resActive = False }
   atomically $ do
     table <- readTVar (rtrTable r)
-    let reg    = getRegistration jid table
-        reg'   = Map.insert (jidResource jid) conn reg
-        table' = setRegistration jid reg' table
+    let reg    = maybe (newRegistration) id (getRegistration jid table)
+        table' = updateResource jid reg res table
     writeTVar (rtrTable r) $! table'
   atomically $ putTMVar replyVar $! RpyBound jid
+
+-- Activates a session on a bound resource
+handleMsg r (MsgActivateSession jid replyVar) = do
+  reply <- atomically $ do
+    table <- readTVar (rtrTable r)
+    let maybeRes = lookupResource jid table
+    case maybeRes of
+      Just (reg,res) -> do
+        let res' = res { resActive = True }
+            table' = updateResource jid reg res' table
+        writeTVar (rtrTable r) $! table'
+        return RpyOK
+      Nothing -> return $ RpyError NotFound
+  atomically $ putTMVar replyVar $! reply
 
 -- Crash is for debugging purposes only
 handleMsg r MsgCrash = do
@@ -216,5 +267,7 @@ handleMsg r MsgCrash = do
   E.throwIO E.DivideByZero
   debug $ (show tid) ++ " should be crashed"
   return ()
+
+{- -------------------------------------------------------------------------- -}
 
 debug = debugM "localRouter"
