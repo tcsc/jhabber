@@ -6,9 +6,9 @@ license: AllRightsReserved
 license-file: ""
 copyright:
 maintainer:
-build-depends: MaybeT -any, base ==4.2.0.2, binary -any,
-               bytestring -any, containers -any, dataenc -any, haskell98 -any,
-               hex -any, hslogger -any, mtl -any, network -any,
+build-depends: HUnit -any, MaybeT -any, base ==4.2.0.2,
+               binary -any, bytestring -any, containers -any, dataenc -any,
+               haskell98 -any, hex -any, hslogger -any, mtl -any, network -any,
                network-bytestring -any, parsec ==2.1.0.1, pureMD5 ==1.1.0.0,
                random -any, stm -any, utf8-string -any
 stability:
@@ -43,7 +43,7 @@ install-includes:
 include-dirs:
 hs-source-dirs: src
 other-modules: Connection ConnectionManager Listener LocalRouter
-               Sasl TextUtils Xml XmlParse Xmpp
+               RoutingTable Sasl TextUtils Xml XmlParse Xmpp
 ghc-prof-options:
 ghc-shared-options:
 ghc-options:

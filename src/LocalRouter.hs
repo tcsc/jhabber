@@ -5,6 +5,7 @@ module LocalRouter (Router,
                     stopRouter,
                     bindResource,
                     activateSession,
+                    discoverInfo,
                     crashRouter) where
 
 import Control.Monad.Error
@@ -20,6 +21,9 @@ import System.Timeout
 import Xmpp(JID(..))
 import {-# SOURCE #-} Connection
 
+import RoutingTable
+import qualified Xmpp
+
 data Failure = Timeout
              | NotFound
   deriving (Eq, Show, Read)
@@ -27,8 +31,11 @@ data Failure = Timeout
 instance Error Failure where
   strMsg x = read x
 
+type NamedItem = (JID, String)
+
 data Reply = RpyBound JID
            | RpyError Failure
+           | RpyItems [NamedItem]
            | RpyOK
   deriving (Eq, Show)
 
@@ -40,6 +47,7 @@ data Message = MsgDummy
              | MsgCrash
              | MsgBind Connection JID ReplyVar
              | MsgActivateSession JID ReplyVar
+             | MsgQuery JID String ReplyVar
 
 {-| The messages that the router manager thread can handle -}
 data RouterMsg = Quit
@@ -52,21 +60,6 @@ type ResultIO a = ErrorT Failure IO a
 
 type CommandQueue = TChan RouterMsg
 type MessageQueue = TChan Message
-
--- | Holds the details of a bound resource
-data Resource = Resource {
-  resId :: JID,
-  resConn :: Connection,
-  resActive :: Bool
-}
-
--- | Holds a mapping between a single user login and the various resources bound
---   to that login. The map is indexed by the resource id.
-type Registration = Map.Map String Resource
-
--- | Holds a mapping between logged in users and the resource maps to their
---   bound resources
-type RoutingTable = Map.Map String Registration
 type RoutingTableVar = TVar RoutingTable
 
 data Router = MkRouter {
@@ -126,6 +119,13 @@ activateSession r jid = do
   case reply of
     RpyOK -> return ()
 
+discoverInfo :: Router -> JID -> String -> ResultIO [NamedItem]
+discoverInfo r jid dst = do
+  replyVar <- liftIO newReplyVar
+  reply <- sendMessageAndWait r (MsgQuery jid dst replyVar) replyVar 1000
+  case reply of
+    RpyItems ns -> return ns
+
 {- -------------------------------------------------------------------------- -}
 
 sendMessageAndWait :: Router -> Message -> ReplyVar -> Int -> ResultIO Reply
@@ -136,29 +136,6 @@ sendMessageAndWait rtr msg rpyVar t = do
   case maybeReply of
     Just rpy -> return rpy
     Nothing -> throwError Timeout
-
-{- -------------------------------------------------------------------------- -}
-
-newRegistration :: Registration
-newRegistration = Map.empty
-
-getRegistration :: JID -> RoutingTable -> Maybe Registration
-getRegistration (JID node _ _) table = Map.lookup node table
-
-setRegistration :: JID -> Registration -> RoutingTable -> RoutingTable
-setRegistration (JID node _ _) reg table =
-  Map.insert node reg table
-
-lookupResource :: JID -> RoutingTable -> Maybe (Registration, Resource)
-lookupResource jid@(JID node _ rid) table = do
-  reg <- getRegistration jid table
-  res <- Map.lookup rid reg
-  return (reg, res)
-
-updateResource :: JID -> Registration -> Resource -> RoutingTable -> RoutingTable
-updateResource jid reg res table =
-  let reg' = Map.insert (jidResource jid) res reg
-  in setRegistration jid reg' table
 
 {- -------------------------------------------------------------------------- -}
 
@@ -236,10 +213,10 @@ handleMsg :: Router -> Message -> IO ()
 
 -- Binds a connection to a jabber ID in the routing table
 handleMsg r (MsgBind conn jid replyVar) = do
-  let res = Resource {resId = jid, resConn = conn, resActive = False }
+  let res = newResource jid conn
   atomically $ do
     table <- readTVar (rtrTable r)
-    let reg    = maybe (newRegistration) id (getRegistration jid table)
+    let reg    = maybe (newRegistration) id (lookupRegistration jid table)
         table' = updateResource jid reg res table
     writeTVar (rtrTable r) $! table'
   atomically $ putTMVar replyVar $! RpyBound jid
@@ -258,6 +235,10 @@ handleMsg r (MsgActivateSession jid replyVar) = do
       Nothing -> return $ RpyError NotFound
   atomically $ putTMVar replyVar $! reply
 
+-- Handles a discovery query from a client. Only ever returns an empty set of
+-- name/value pairs
+handleMsg r (MsgQuery jid dst replyVar) = replyTo replyVar (RpyItems [])
+
 -- Crash is for debugging purposes only
 handleMsg r MsgCrash = do
   tid <- myThreadId
@@ -267,6 +248,11 @@ handleMsg r MsgCrash = do
   E.throwIO E.DivideByZero
   debug $ (show tid) ++ " should be crashed"
   return ()
+
+{- -------------------------------------------------------------------------- -}
+
+replyTo :: ReplyVar -> Reply -> IO ()
+replyTo replyVar reply = atomically $ putTMVar replyVar $! reply
 
 {- -------------------------------------------------------------------------- -}
 

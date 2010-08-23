@@ -21,6 +21,7 @@ import qualified Data.ByteString.UTF8 as Utf8
 import Data.List
 import Data.Either
 import Data.IORef
+import Data.Maybe
 import Network.BSD
 import Network.Socket hiding (send, sendTo, recv, recvFrom)
 import Network.Socket.ByteString
@@ -94,18 +95,30 @@ instance Error ReadFailure where
 type ReadResult a = Either ReadFailure a
 type ReadResultIO a = ErrorT ReadFailure IO a
 
-data ConnFailure = AuthFailure
-                 | UnsupportedMechanism
+data ConnFailure = AccessDenied
+                 | AuthFailure
+                 | BadRequest
+                 | BindConflict
                  | NotAuthenticated
+                 | NotFound
                  | XmppFailure
                  | Timeout
                  | Unsupported
                  | UnknownFailure
+                 | UnsupportedMechanism
+                 | ServiceUnavailable
                  deriving (Read, Show, Eq)
+
+data ErrorType = ErrTryAgain | ErrCancel
+
 instance Error ConnFailure where
   strMsg x = read x
+
 type ConnResult a = Either ConnFailure a
 type ConnResultIO a = ErrorT ConnFailure IO a
+
+type XmppResultIO a = ErrorT Xmpp.Failure IO a
+
 
 localhost = "localhost"
 
@@ -307,12 +320,12 @@ handleInboundStanza (Xmpp.AuthResponse r) state = do
       _ -> return ()
     throwError e
 
-handleInboundStanza (Xmpp.Iq id action target) state = do
+handleInboundStanza iq@(Xmpp.Iq _ _ _ _ _) state = do
   debugM $ "IQ"
   if not (Connection.isAuthenticated state)
     then throwError NotAuthenticated
     else do
-      (response, state') <- handleIq id action target state
+      (response, state') <- handleIq iq state
       liftIO $ xmppSend (stateSocket state) response
       return ([Ok], state')
 
@@ -323,18 +336,70 @@ uid s = Sasl.getUid $ authInfo s
 
 {- -------------------------------------------------------------------------- -}
 
-handleIq :: String -> Xmpp.IqAction -> Xmpp.IqTarget -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
-handleIq rid Xmpp.Set (Xmpp.BindResource n) state = do
-  let resourceName = maybe "default" id n
-  let jid = Xmpp.JID (uid state) localhost resourceName
-  let handle = getHandle state
-  jid' <- liftRouterIO $ bindResource (router state) (getHandle state) jid
-  let state' = state { stateJid = jid' }
-  return (Xmpp.Iq rid Xmpp.Result (Xmpp.BoundJid jid'), state')
+handleIq :: Xmpp.Stanza -> ConnState -> ConnResultIO (Xmpp.Stanza, ConnState)
+handleIq iq@(Xmpp.Iq rid to from action (xml:_)) state = do
+  response <- liftIO $ runErrorT $ runIq action xml state
+  case response of
+    Right (response, state') -> do
+      let stanza = Xmpp.Iq rid from to Xmpp.Result response
+      return (stanza, state')
+    Left err ->
+      return (Xmpp.Iq rid from to Xmpp.Error (showError xml err), state)
+  where
+    showError :: XmlElement -> ConnFailure -> [XmlElement]
+    showError req error =
+      let (errType, xmlName) = case error of
+                                 AccessDenied -> ("cancel","not-allowed")
+                                 BadRequest -> ("modify","bad-request")
+                                 BindConflict -> ("cancel","conflict")
+                                 Connection.NotFound -> ("cancel","item-not-found")
+                                 ServiceUnavailable -> ("cancel","service-unavailable")
+          xml = Xmpp.formatError errType xmlName
+      in [req, xml]
 
-handleIq rid Xmpp.Set Xmpp.Session state = do
-  liftRouterIO $ activateSession (router state) (stateJid state)
-  return (Xmpp.Iq rid Xmpp.Result Xmpp.None, state)
+
+{- -------------------------------------------------------------------------- -}
+
+runIq :: Xmpp.IqAction ->  XmlElement -> ConnState -> ConnResultIO ([XmlElement], ConnState)
+runIq action xml state = do
+  let contentName = (elemNamespace xml, elemName xml)
+  case contentName of
+    (nsBind, "bind") -> handleBind action xml state
+    (nsSession, "session") -> handleSession action xml state
+    (nsDiscovery, "query") -> handleServiceDiscovery action xml state
+    _ -> throwError ServiceUnavailable
+
+{- -------------------------------------------------------------------------- -}
+
+handleBind :: Xmpp.IqAction -> XmlElement -> ConnState -> ConnResultIO ([XmlElement], ConnState)
+handleBind action xml state = do
+  case action of
+    Xmpp.Set -> do
+      let resourceName = Xmpp.getBindResourceName xml
+      let jid = Xmpp.JID (uid state) localhost resourceName
+      let handle = getConnectionHandle state
+      jid' <- liftRouterIO $ bindResource (router state) (getConnectionHandle state) jid
+      let state' = state { stateJid = jid' }
+      return ( [XmlElement "" "jid" [] [XmlText (show jid')]], state')
+    _ -> throwError ServiceUnavailable
+
+{- -------------------------------------------------------------------------- -}
+
+handleSession :: Xmpp.IqAction -> XmlElement -> ConnState -> ConnResultIO ([XmlElement], ConnState)
+handleSession action content state = do
+  case action of
+    Xmpp.Set -> do
+      liftRouterIO $ activateSession (router state) (stateJid state)
+      return ([], state)
+    _ -> throwError ServiceUnavailable
+
+{- -------------------------------------------------------------------------- -}
+
+handleServiceDiscovery :: Xmpp.IqAction -> XmlElement -> ConnState -> ConnResultIO([XmlElement], ConnState)
+handleServiceDiscovery action content state = do
+--  let jid = stateJid state
+--  items <- liftRouterIO $ discoverInfo (router state) jid
+  return $ ([], state)
 
 {- -------------------------------------------------------------------------- -}
 
@@ -393,8 +458,8 @@ isAuthenticated s = Sasl.isAuthenticated $ authInfo s
 
 {- -------------------------------------------------------------------------- -}
 
-getHandle :: ConnState -> Connection
-getHandle state = Conn (idNumber state) (msgQ state)
+getConnectionHandle :: ConnState -> Connection
+getConnectionHandle state = Conn (idNumber state) (msgQ state)
 
 {- -------------------------------------------------------------------------- -}
 
