@@ -57,7 +57,6 @@ getNamedChild ns n xml =
     [] -> Nothing
     c -> Just $ head c
 
-
 -- | Fetches the text of the first child of the element, if (and only if) that
 --   child is a text node
 getChildText :: XmlElement -> Maybe String
@@ -74,10 +73,11 @@ formatElement :: Bool -> XmlElement -> String
 formatElement short e@(XmlElement _ _ attribs subs) =
   let fullName = qualifiedName e in
     "<" ++ fullName ++
-      formatAttributes attribs ++ ">" ++
-      if short
-        then ""
-      else (formatElements False subs) ++ "</" ++ fullName ++ ">"
+      formatAttributes attribs ++
+      if short then ">"
+        else case subs of
+              [] -> "/>"
+              _ -> ">" ++ (formatElements False subs) ++ "</" ++ fullName ++ ">"
 formatElement _ (XmlText s) = s
 
 formatShortElement :: XmlElement -> String
