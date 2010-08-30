@@ -1,6 +1,7 @@
 module RoutingTable(Resource,
                     Registration,
                     RoutingTable,
+                    newRoutingTable,
                     newRegistration,
                     lookupRegistration,
                     updateRegistration,
@@ -33,6 +34,9 @@ type Registration = Map.Map String Resource
 type RoutingTable = Map.Map String Registration
 
 {- -------------------------------------------------------------------------- -}
+
+newRoutingTable :: RoutingTable
+newRoutingTable = Map.empty
 
 newRegistration :: Registration
 newRegistration = Map.empty
