@@ -23,6 +23,7 @@ import {-# SOURCE #-} Connection
 
 import RoutingTable
 import qualified Xmpp
+import WorkerPool
 
 data Failure = Timeout
              | NotFound
@@ -39,220 +40,108 @@ data Reply = RpyBound JID
            | RpyOK
   deriving (Eq, Show)
 
-{-| A signal used send a response back to a waiting client -}
-type ReplyVar = TMVar Reply
-
 {-| The messages that our worker threads can handle -}
 data Message = MsgDummy
              | MsgCrash
-             | MsgBind Connection JID ReplyVar
-             | MsgActivateSession JID ReplyVar
-             | MsgQuery JID String ReplyVar
-
-{-| The messages that the router manager thread can handle -}
-data RouterMsg = Quit
-               | Crashed ThreadId E.SomeException
-               | Exited ThreadId
-  deriving(Show)
+             | MsgBind Connection JID
+             | MsgActivateSession JID
+             | MsgQuery JID String
 
 type Result a = Either Failure a
 type ResultIO a = ErrorT Failure IO a
 
-type CommandQueue = TChan RouterMsg
-type MessageQueue = TChan Message
 type RoutingTableVar = TVar RoutingTable
 
-data Router = MkRouter {
-  rtrMsgQ :: MessageQueue,
-  rtrCmdQ :: CommandQueue,
-  rtrTable :: RoutingTableVar
-}
-
-data RouterState = State {
-  stateMsgQ :: MessageQueue,
-  stateCmdQ :: CommandQueue,
-  stateWorkers :: [ThreadId],
-  stateTable :: RoutingTableVar
-}
+data Router = MkRouter (WorkerPool Message Reply)
 
 {- -------------------------------------------------------------------------- -}
 
 newRouter :: Int -> IO Router
 newRouter nThreads = do
-  msgQ <- newTChanIO -- :: (Chan Message)
-  cmdQ <- newTChanIO
-  t <- newTVarIO $ Map.empty
-  forkIO $ routerMain nThreads cmdQ msgQ t
-  return $ MkRouter { rtrMsgQ = msgQ, rtrCmdQ = cmdQ, rtrTable = t }
+    rtVal <- newTVarIO newRoutingTable
+    pool <- newWorkerPool nThreads (setup rtVal) handleMsg teardown
+    return $ MkRouter pool
+  where
+    setup :: RoutingTableVar -> IO (RoutingTableVar)
+    setup v = return v
+
+    teardown :: RoutingTableVar -> IO ()
+    teardown _ = return ()
 
 {- -------------------------------------------------------------------------- -}
 
 stopRouter :: Router -> IO ()
-stopRouter r = do
+stopRouter (MkRouter workerPool) = do
   debug "Stopping router"
-  atomically $ writeTChan (rtrCmdQ r) Quit
-  threadDelay 1000000
-  return ()
-
-{- -------------------------------------------------------------------------- -}
-
-newReplyVar :: IO ReplyVar
-newReplyVar = newEmptyTMVarIO
+  stopWorkerPool workerPool
 
 {- -------------------------------------------------------------------------- -}
 
 -- | todo: handle the case where the resource is already bound to to another
 --         connection
 bindResource :: Router -> Connection -> JID -> ResultIO JID
-bindResource r conn jid = do
-  replyVar <- liftIO $ newReplyVar
-  reply <- sendMessageAndWait r (MsgBind conn jid replyVar) replyVar 1000
+bindResource (MkRouter workerPool) conn jid = do
+  reply <- liftIO $ call workerPool (MsgBind conn jid)
   case reply of
     RpyBound jid' -> return jid'
 
 {- -------------------------------------------------------------------------- -}
 
 activateSession :: Router -> JID -> ResultIO ()
-activateSession r jid = do
-  replyVar <- liftIO $ newReplyVar
-  reply <- sendMessageAndWait r (MsgActivateSession jid replyVar) replyVar 1000
-  case reply of
-    RpyOK -> return ()
-
-discoverInfo :: Router -> JID -> String -> ResultIO [NamedItem]
-discoverInfo r jid dst = do
-  replyVar <- liftIO newReplyVar
-  reply <- sendMessageAndWait r (MsgQuery jid dst replyVar) replyVar 1000
-  case reply of
-    RpyItems ns -> return ns
-
-{- -------------------------------------------------------------------------- -}
-
-sendMessageAndWait :: Router -> Message -> ReplyVar -> Int -> ResultIO Reply
-sendMessageAndWait rtr msg rpyVar t = do
-  let q = rtrMsgQ rtr
-  liftIO (atomically $ writeTChan q msg)
-  maybeReply <- liftIO $ timeout t (atomically $ takeTMVar rpyVar)
-  case maybeReply of
-    Just rpy -> return rpy
-    Nothing -> throwError Timeout
-
-{- -------------------------------------------------------------------------- -}
-
-crashRouter :: Router -> IO ()
-crashRouter r = do
-  atomically $ writeTChan (rtrMsgQ r) MsgCrash
+activateSession (MkRouter workerPool) jid = do
+  liftIO $ call workerPool $ (MsgActivateSession jid)
   return ()
 
 {- -------------------------------------------------------------------------- -}
 
-routerMain :: Int -> CommandQueue -> MessageQueue -> RoutingTableVar -> IO ()
-routerMain nThreads cmdQ msgQ rTable = do
-  debug "Starting new local router thread"
-  let router = MkRouter msgQ cmdQ rTable
-  ts <- mapM (\_ -> forkWorker router) [1..nThreads]
-  loop State { stateCmdQ = cmdQ,
-               stateMsgQ = msgQ,
-               stateWorkers = ts,
-               stateTable = rTable }
-    where
-      loop :: RouterState -> IO ()
-      loop state = do cmd <- atomically $ readTChan cmdQ
-                      result <- handleCmd cmd state
-                      case result of
-                        Just state' -> loop state'
-                        Nothing -> return ()
+discoverInfo :: Router -> JID -> String -> ResultIO [NamedItem]
+discoverInfo (MkRouter workerPool) jid dst = do
+  liftIO $ call workerPool (MsgQuery jid dst)
+  return []
 
 {- -------------------------------------------------------------------------- -}
 
-handleCmd :: RouterMsg -> RouterState -> IO (Maybe RouterState)
-handleCmd Quit s = do
-  debug "Quitting manager thread"
-  return Nothing
-
-handleCmd (Crashed tid _) s = do
-  debug $ "Worker thread " ++ (show tid) ++ " crashed!"
-  let workers = delete tid (stateWorkers s)
-  let router = MkRouter (stateMsgQ s) (stateCmdQ s) (stateTable s)
-  tid <- forkWorker router
-  return (Just s { stateWorkers = tid : workers})
-
-hanldleCmd _ s = do
-  return (Just s)
+crashRouter :: Router -> IO ()
+crashRouter (MkRouter workerPool) = post workerPool MsgCrash
 
 {- -------------------------------------------------------------------------- -}
-
-forkWorker :: Router -> IO ThreadId
-forkWorker router = do
-  forkIO $ do
-    tid <- myThreadId
-    debug $ "Starting new router worker on: " ++ (show tid)
-    result <- tryWorkerThread router
-    atomically $ writeTChan (rtrCmdQ router) $
-      either (Crashed tid) (const (Exited tid)) result
-
-{- -------------------------------------------------------------------------- -}
-
-tryWorkerThread :: Router -> IO (Either E.SomeException ())
-tryWorkerThread router = do
-  E.try $ workerThread router
-
-{- -------------------------------------------------------------------------- -}
-
-workerThread :: Router  -> IO ()
-workerThread router = loop router
-  where
-    loop :: Router -> IO ()
-    loop r = do
-      msg <- atomically $ readTChan (rtrMsgQ r)
-      handleMsg r msg
-      loop r
-
-{-| Handles a worker thread message -}
-handleMsg :: Router -> Message -> IO ()
 
 -- Binds a connection to a jabber ID in the routing table
-handleMsg r (MsgBind conn jid replyVar) = do
+handleMsg :: Message -> RoutingTableVar -> IO ((Maybe Reply), RoutingTableVar)
+handleMsg (MsgBind conn jid) tableVar = do
   let res = newResource jid conn
   atomically $ do
-    table <- readTVar (rtrTable r)
+    table <- readTVar tableVar
     let reg    = maybe (newRegistration) id (lookupRegistration jid table)
         table' = updateResource jid reg res table
-    writeTVar (rtrTable r) $! table'
-  atomically $ putTMVar replyVar $! RpyBound jid
+    writeTVar tableVar $! table'
+  return (Just(RpyBound jid), tableVar)
 
 -- Activates a session on a bound resource
-handleMsg r (MsgActivateSession jid replyVar) = do
+handleMsg (MsgActivateSession jid) tableVar = do
   reply <- atomically $ do
-    table <- readTVar (rtrTable r)
+    table <- readTVar tableVar
     let maybeRes = lookupResource jid table
     case maybeRes of
       Just (reg,res) -> do
         let res' = res { resActive = True }
             table' = updateResource jid reg res' table
-        writeTVar (rtrTable r) $! table'
+        writeTVar tableVar $! table'
         return RpyOK
       Nothing -> return $ RpyError NotFound
-  atomically $ putTMVar replyVar $! reply
+  return ((Just reply), tableVar)
 
 -- Handles a discovery query from a client. Only ever returns an empty set of
 -- name/value pairs
-handleMsg r (MsgQuery jid dst replyVar) = replyTo replyVar (RpyItems [])
+handleMsg (MsgQuery jid dst) tableVar = return (Just (RpyItems []), tableVar)
 
 -- Crash is for debugging purposes only
-handleMsg r MsgCrash = do
+handleMsg MsgCrash tableVar = do
   tid <- myThreadId
   debug $ "crash requested on " ++ (show tid)
- -- let i = 1 / 0
- -- debug $ "div by 0 " ++ (show i)
   E.throwIO E.DivideByZero
   debug $ (show tid) ++ " should be crashed"
-  return ()
-
-{- -------------------------------------------------------------------------- -}
-
-replyTo :: ReplyVar -> Reply -> IO ()
-replyTo replyVar reply = atomically $ putTMVar replyVar $! reply
+  return (Nothing, tableVar)
 
 {- -------------------------------------------------------------------------- -}
 
