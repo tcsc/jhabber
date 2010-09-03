@@ -29,6 +29,7 @@ import qualified System.Log.Logger as L
 import Text.ParserCombinators.Parsec(Parser, parse, try, (<|>))
 import Text.ParserCombinators.Parsec.Error
 
+import Database
 import Sasl
 import Xml
 import qualified XmlParse as XmlParse
@@ -75,6 +76,7 @@ data ConnState = State { idNumber :: Integer,
                          onLostCB :: Callback,
                          msgQ :: ConnMsgQ,
                          authInfo :: AuthInfo,
+                         database :: Database,
                          stateJid :: Xmpp.JID }
 
 data ReaderState = ReaderState { rdrCondVar :: ResponseVar,
@@ -124,8 +126,8 @@ localhost = "localhost"
 
 {- ------------------------------------------------------------------------- -}
 
-startConnection :: Router -> Integer -> Socket -> Callback -> IO Connection
-startConnection r cId s onLost = do
+startConnection :: Router -> Integer -> Database -> Socket -> Callback -> IO Connection
+startConnection r cId db s onLost = do
   q <- newTChanIO
   let c = Conn cId q
   let state = State { idNumber = cId,
@@ -134,6 +136,7 @@ startConnection r cId s onLost = do
                       msgQ = q,
                       onLostCB = onLost,
                       authInfo = None,
+                      database = db,
                       stateJid = (Xmpp.JID "" "" "") }
   forkIO $ runConnection state
   return c
@@ -440,16 +443,17 @@ handleAuthResponse state auth response = do
 
 authenticate :: ConnState -> AuthInfo -> ConnResultIO ConnState
 authenticate state authInfo = do
-  -- TODO: lookup this user's *actual* password here
-  let pwd = "pwd"
   let uid = getUid authInfo
+  info <- liftIO $ lookupUser (database state) uid
+  case info of
+    Nothing -> throwError AuthFailure
+    Just userInfo ->
+      case checkCredentials authInfo uid (userPassword userInfo) of
+        Right (authInfo', Challenge rval) -> do
+          liftIO $ xmppSend (stateSocket state) $ Xmpp.AuthChallenge rval
+          return state { authInfo = authInfo' }
 
-  case checkCredentials authInfo uid pwd of
-    Right (authInfo', Challenge rval) -> do
-      liftIO $ xmppSend (stateSocket state) $ Xmpp.AuthChallenge rval
-      return state { authInfo = authInfo' }
-
-    Left _ -> throwError AuthFailure
+        Left _ -> throwError AuthFailure
 
 {- -------------------------------------------------------------------------- -}
 

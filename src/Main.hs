@@ -7,6 +7,7 @@ import Network.Socket
 import System.Log.Logger
 import System.Log.Handler.Simple
 
+import Database
 import ConnectionManager
 import Listener
 import LocalRouter
@@ -25,8 +26,9 @@ main = withSocketsDo $ do
 
   debug "Entering main"
   r <- newRouter 4
+  db <- startDb "jhabber.db"
   mgr <- newConnectionManager r
-  l <- startlistener (newConnection mgr) 4321
+  l <- startlistener (newConnection mgr db) 4321
   mainloop State { stateRouter = r, stateManager = mgr, stateListeners = [l] }
 
 mainloop :: State -> IO ()
@@ -42,10 +44,10 @@ mainloop s = do
     _   -> mainloop s
     -}
 
-newConnection :: ConnectionManager -> Socket -> IO ()
-newConnection mgr s = do
+newConnection :: ConnectionManager -> Database -> Socket -> IO ()
+newConnection mgr db s = do
   debug "new connection" -- conn <- newConnection s
-  createConnection mgr s
+  createConnection mgr db s
   return ()
 
 shutdown :: State -> IO ()

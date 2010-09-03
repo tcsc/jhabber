@@ -3,6 +3,7 @@ module WorkerPool(WorkerPool,
                   WorkerTeardown,
                   MessageHandler,
                   call,
+                  callWithTimeout,
                   post,
                   newWorkerPool,
                   stopWorkerPool) where
@@ -12,6 +13,8 @@ import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
 import Control.Concurrent.STM
 import Data.List
 import Data.Maybe
+import System.Timeout(timeout)
+import System.Log.Logger
 
 -- | Defines an "operation complete" signal as well as providing a mechanism
 --   where a message handler can return a result to the original caler
@@ -54,6 +57,10 @@ data PoolState msg reply state = PoolState { poolThreadCount :: Int,
                                              poolThreads :: [ThreadId],
                                              poolFuns :: PoolFuns msg reply state }
 
+data WorkerPoolError = Timeout
+
+type WorkerResultIO reply = IO (Either WorkerPoolError reply)
+
 -- | Forks off a pool manager thread and returns a handle to the newly created
 --   worker pool
 newWorkerPool :: Int ->
@@ -68,6 +75,7 @@ newWorkerPool threads setup handler teardown = do
   forkIO $ mgrThreadMain threads mgrQ wkrQ funs
   return $ MkWorkerPool mgrQ wkrQ
 
+-- | Stops the worker pool, but does not wait for the pool threads to exit.
 stopWorkerPool :: WorkerPool msg reply -> IO ()
 stopWorkerPool (MkWorkerPool mgrQ _) = do
   atomically $ writeTChan mgrQ Exit
@@ -99,7 +107,8 @@ mgrThreadMain nThreads mgrQ wkrQ handlers = do
 
             -- The thread has crashed. Restart it and hope that whatever caused
             -- the crash has gone away.
-            Just _ -> do
+            Just e -> do
+              logError $ (show tid) ++ " crashed with " ++ (show e)
               newTid <- forkWorker mgrQ wkrQ (poolFuns state)
               loop mgrQ wkrQ $ state { poolThreads = newTid : tids }
 
@@ -115,7 +124,7 @@ forkWorker mgrQ wkrQ funs = forkIO $ tryWorker mgrQ wkrQ funs
     tryWorker :: MgrQ -> WkrQ msg reply-> PoolFuns msg reply state -> IO ()
     tryWorker mgrQ wkrQ (PoolFuns setup teardown handler) = do
       tid <- myThreadId
-      result <- try $ bracket setup (loop mgrQ wkrQ handler) teardown
+      result <- try $ bracket setup teardown (loop mgrQ wkrQ handler)
       let response = either (Just) (\_ -> Nothing) result
       atomically $ writeTChan mgrQ $ ThreadExit tid response
 
@@ -138,6 +147,15 @@ call (MkWorkerPool _ wkrQ) msg = do
   atomically $ writeTChan wkrQ $! HandleAndReply msg replyVar
   atomically $ takeTMVar replyVar
 
+callWithTimeout :: WorkerPool msg reply -> msg -> Int -> WorkerResultIO reply
+callWithTimeout (MkWorkerPool _ wkrQ) msg t = do
+  replyVar <- newReplyVar
+  atomically $ writeTChan wkrQ $! HandleAndReply msg replyVar
+  result <- timeout t $ atomically $ takeTMVar replyVar
+  case result of
+    Just rpy -> return $ Right rpy
+    Nothing -> return $ Left Timeout
+
 -- | Posts a message to the worker pool and does not await a reply
 post :: WorkerPool msg reply -> msg -> IO ()
 post (MkWorkerPool _ wkrQ) msg = atomically $
@@ -150,3 +168,6 @@ sendReply replyVar reply = atomically $ putTMVar replyVar $! fromJust reply
 
 newReplyVar :: IO (ReplyVar reply)
 newReplyVar = newEmptyTMVarIO
+
+debug = debugM "pool"
+logError = errorM "pool"
