@@ -3,11 +3,14 @@ module Xmpp ( Stanza(..),
               IqTarget(..),
               JID(..),
               Failure(..),
+              RosterEntry(..),
+              RosterGroup(..),
               toXml,
               format,
               fromXml,
               newAuthFailure,
               getBindResourceName,
+              parseJid,
               formatError) where
 
 import Codec.Binary.Base64(encode, decode)
@@ -28,8 +31,17 @@ data JID = JID { jidName :: !String,
                  jidResource :: !String }
            deriving (Eq)
 
+-- | Represents a single XMPP roster entry
+data RosterEntry = RosterEntry !String !JID !String ![RosterGroup]
+
+-- | Represents a group for roster contacts
+data RosterGroup = RosterGroup !String
+
 instance Show JID where
-  show (JID n h r) = n ++ "@" ++ h ++ "/" ++ r
+  show (JID n h r) = n ++ "@" ++ h ++ (resource r)
+                     where resource s = case s of
+                                          [] -> []
+                                          _ -> "/" ++ s
 
 data IqAction = Set | Get | Result | Error
   deriving (Eq)

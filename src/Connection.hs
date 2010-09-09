@@ -76,7 +76,7 @@ data ConnState = State { idNumber :: Integer,
                          onLostCB :: Callback,
                          msgQ :: ConnMsgQ,
                          authInfo :: AuthInfo,
-                         database :: Database,
+                         database :: JhabberDb,
                          stateJid :: Xmpp.JID }
 
 data ReaderState = ReaderState { rdrCondVar :: ResponseVar,
@@ -126,7 +126,7 @@ localhost = "localhost"
 
 {- ------------------------------------------------------------------------- -}
 
-startConnection :: Router -> Integer -> Database -> Socket -> Callback -> IO Connection
+startConnection :: Router -> Integer -> JhabberDb -> Socket -> Callback -> IO Connection
 startConnection r cId db s onLost = do
   q <- newTChanIO
   let c = Conn cId q
