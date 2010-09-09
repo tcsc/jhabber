@@ -10,7 +10,7 @@ import System.Log.Logger(debugM)
 
 
 import Connection(Connection, startConnection, connectionId)
-import Database(Database, UserInfo, lookupUser)
+import Database(JhabberDb, UserInfo, lookupUser)
 import LocalRouter
 import XmlParse
 import Xmpp
@@ -30,7 +30,7 @@ newConnectionManager r = do
 Creates a new connection object and remembers it. Also spawns a new thread for
 handling all of the connection I/O
 -}
-createConnection :: ConnectionManager -> Database -> Socket -> IO Connection
+createConnection :: ConnectionManager -> JhabberDb -> Socket -> IO Connection
 createConnection mgr@(Mgr r _) db s = do
   newId <- atomically $ getNewId mgr
   debug $ "Starting connection #" ++ (show newId)

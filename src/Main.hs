@@ -26,7 +26,7 @@ main = withSocketsDo $ do
 
   debug "Entering main"
   r <- newRouter 4
-  db <- startDb "jhabber.db"
+  db <- startDb "127.0.0.1" "jhabber"
   mgr <- newConnectionManager r
   l <- startlistener (newConnection mgr db) 4321
   mainloop State { stateRouter = r, stateManager = mgr, stateListeners = [l] }
@@ -44,7 +44,7 @@ mainloop s = do
     _   -> mainloop s
     -}
 
-newConnection :: ConnectionManager -> Database -> Socket -> IO ()
+newConnection :: ConnectionManager -> JhabberDb -> Socket -> IO ()
 newConnection mgr db s = do
   debug "new connection" -- conn <- newConnection s
   createConnection mgr db s

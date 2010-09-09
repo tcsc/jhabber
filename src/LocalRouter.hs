@@ -59,7 +59,7 @@ data Router = MkRouter (WorkerPool Message Reply)
 newRouter :: Int -> IO Router
 newRouter nThreads = do
     rtVal <- newTVarIO newRoutingTable
-    pool <- newWorkerPool nThreads (setup rtVal) handleMsg teardown
+    pool <- newWorkerPool nThreads (setup rtVal) teardown handleMsg
     return $ MkRouter pool
   where
     setup :: RoutingTableVar -> IO (RoutingTableVar)

@@ -6,10 +6,10 @@ license: AllRightsReserved
 license-file: ""
 copyright:
 maintainer:
-build-depends: HDBC -any, HDBC-sqlite3 -any, HUnit -any,
-               MaybeT -any, base ==4.2.0.2, binary -any, bytestring -any,
-               containers -any, dataenc -any, haskell98 -any, hex -any,
-               hslogger -any, mtl -any, network -any, network-bytestring -any,
+build-depends: HUnit -any, MaybeT -any, base ==4.2.0.2,
+               binary -any, bson -any, bytestring -any, containers -any,
+               dataenc -any, haskell98 -any, hex -any, hslogger -any,
+               mongoDB -any, mtl -any, network -any, network-bytestring -any,
                parsec ==2.1.0.1, pureMD5 ==1.1.0.0, random -any, stm -any,
                utf8-string -any
 stability:
@@ -36,7 +36,7 @@ ld-options:
 pkgconfig-depends:
 frameworks:
 c-sources:
-extensions:
+extensions: DeriveDataTypeable
 extra-libraries:
 extra-lib-dirs:
 includes:

@@ -64,11 +64,11 @@ type WorkerResultIO reply = IO (Either WorkerPoolError reply)
 -- | Forks off a pool manager thread and returns a handle to the newly created
 --   worker pool
 newWorkerPool :: Int ->
-                 WorkerSetup state ->
-                 MessageHandler msg reply state ->
-                 WorkerTeardown state ->
+                 WorkerSetup state ->              -- ^ creates a new worker thread state
+                 WorkerTeardown state ->           -- ^ destroys a worker thread state
+                 MessageHandler msg reply state -> -- ^ the message handling function
                  IO (WorkerPool msg reply)
-newWorkerPool threads setup handler teardown = do
+newWorkerPool threads setup teardown handler = do
   mgrQ <- newTChanIO
   wkrQ <- newTChanIO
   let funs = PoolFuns setup teardown handler
@@ -147,6 +147,8 @@ call (MkWorkerPool _ wkrQ) msg = do
   atomically $ writeTChan wkrQ $! HandleAndReply msg replyVar
   atomically $ takeTMVar replyVar
 
+-- | Posts a message to the worker queue and waits - up to a given timeout - for
+--   a reply. Returns Nothing if the request times out.
 callWithTimeout :: WorkerPool msg reply -> msg -> Int -> WorkerResultIO reply
 callWithTimeout (MkWorkerPool _ wkrQ) msg t = do
   replyVar <- newReplyVar
