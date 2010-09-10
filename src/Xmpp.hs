@@ -1,4 +1,5 @@
-module Xmpp ( Stanza(..),
+module Xmpp ( Namespace(..),
+              Stanza(..),
               IqAction(..),
               IqTarget(..),
               JID(..),
@@ -10,7 +11,9 @@ module Xmpp ( Stanza(..),
               fromXml,
               newAuthFailure,
               getBindResourceName,
+              parseNamespace,
               parseJid,
+              formatRoster,
               formatError) where
 
 import Codec.Binary.Base64(encode, decode)
@@ -18,6 +21,7 @@ import Control.Monad.Error
 import Data.ByteString(ByteString, pack, unpack)
 import Data.ByteString.UTF8(fromString, toString)
 import Data.List
+import Data.Typeable
 import Text.Read
 
 import Xml
@@ -29,13 +33,15 @@ import TextUtils
 data JID = JID { jidName :: !String,
                  jidHost :: !String,
                  jidResource :: !String }
-           deriving (Eq)
+           deriving (Eq, Typeable)
 
 -- | Represents a single XMPP roster entry
 data RosterEntry = RosterEntry !String !JID !String ![RosterGroup]
+                   deriving (Eq, Show, Typeable)
 
 -- | Represents a group for roster contacts
 data RosterGroup = RosterGroup !String
+                   deriving (Eq, Show, Typeable)
 
 instance Show JID where
   show (JID n h r) = n ++ "@" ++ h ++ (resource r)
@@ -91,17 +97,18 @@ data Stanza = RxStreamOpen String Float
                    iqContent :: [XmlElement] }
             deriving (Show, Eq)
 
-nsJabber = "jabber:client"
-nsStreams = "http://etherx.jabber.org/streams"
-nsBind = "urn:ietf:params:xml:ns:xmpp-bind"
-nsStanzas = "urn:ietf:params:ns:xmpp-stanzas"
-nsSession = "urn:ietf:params:xml:ns:xmpp-session"
-nsDiscovery = "http://jabber.org/protocol/disco#items"
+data Namespace = NsJabberClient
+               | NsStreams
+               | NsBind
+               | NsStanzas
+               | NsSession
+               | NsDiscovery
+               | NsRoster
+               | NsOther !String
 
 namespaces :: [XmlAttribute]
-namespaces = [
-  (XmlAttribute "" "xmlns" nsJabber),
-  (XmlAttribute "xmlns" "stream" nsStreams) ]
+namespaces = [ (XmlAttribute "" "xmlns" (show NsJabberClient)),
+               (XmlAttribute "xmlns" "stream" (show NsStreams)) ]
 
 txStreamStart :: String -> Integer -> XmlElement
 txStreamStart rx sId =
@@ -144,8 +151,8 @@ toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
 -- | Parses an XML stanza into a (possible) XMPP message
 fromXml :: XmlElement -> Maybe Stanza
 fromXml element@(XmlElement nsStreams "stream" attribs _) = do
-  to <- getAttribute nsJabber "to" element
-  verText <- getAttribute nsJabber "version" element
+  to <- getAttribute (show NsJabberClient) "to" element
+  verText <- getAttribute (show NsJabberClient) "version" element
   ver <- readM verText
   return $ RxStreamOpen to ver
 
@@ -179,7 +186,7 @@ fromXml element = Nothing
 
 getBindResourceName :: XmlElement -> String
 getBindResourceName xml = maybe "" id $ do
-  child <- getNamedChild nsBind "resource" xml
+  child <- getNamedChild (show NsBind) "resource" xml
   name <- getChildText child
   return name
 
@@ -191,7 +198,7 @@ iqTargetFromXml xml@(XmlElement nsBind "bind" _ _) =
   where
     getResourceName :: XmlElement -> Maybe String
     getResourceName x = do
-      child <- getNamedChild nsBind "resource" xml
+      child <- getNamedChild (show NsBind) "resource" xml
       name <- getChildText child
       return name
 
@@ -202,14 +209,25 @@ iqTargetFromXml xml@(XmlElement nsDiscovery "query" _ _) = Just ItemQuery
 iqTargetFromXml _ = Nothing
 
 {- -------------------------------------------------------------------------- -}
+formatRoster :: [RosterEntry] -> [XmlElement]
+formatRoster r = map formatEntry r
+  where
+    formatEntry (RosterEntry _ jid name groups) =
+      XmlElement "" "item" [XmlAttribute "" "jid" (show jid),
+                            XmlAttribute "" "name" name,
+                            XmlAttribute "" "subscription" "both"] (formatGroups groups)
+    formatGroups gs = map (\(RosterGroup g) -> XmlElement "" "group" [] [XmlText g]) gs
+
+
+{- -------------------------------------------------------------------------- -}
 
 iqTargetToXml :: IqTarget -> [XmlElement]
 iqTargetToXml (BoundJid jid) =
   let resource = XmlElement "" "resource" [] [XmlText (show jid)] in
-  [XmlElement "" "bind" [XmlAttribute "" "xmlns" nsBind] [resource]]
+  [XmlElement "" "bind" [XmlAttribute "" "xmlns" (show NsBind)] [resource]]
 
 iqTargetToXml (ErrorCode err) =
-  let errType = XmlElement "" (show err) [XmlAttribute "" "xmlns" nsStanzas] []
+  let errType = XmlElement "" (show err) [XmlAttribute "" "xmlns" (show NsStanzas)] []
   in
   [XmlElement "" "error" [XmlAttribute "" "type" "cancel"] [errType]]
 
@@ -230,7 +248,7 @@ parseJid s =
 
 formatError :: String -> String -> XmlElement
 formatError errType errName =
-  let  errXml = XmlElement "" errName [XmlAttribute "" "xmlns" nsStanzas] []
+  let  errXml = XmlElement "" errName [XmlAttribute "" "xmlns" (show NsStanzas)] []
   in XmlElement "" "error" [XmlAttribute "" "type" errType] [errXml]
 
 {- -------------------------------------------------------------------------- -}
@@ -248,6 +266,28 @@ parseIqType s = case s of
 newAuthFailure :: String -> Stanza
 newAuthFailure f = Failure (nsSasl) child
  where child = newElement f
+
+{- -------------------------------------------------------------------------- -}
+
+parseNamespace :: String -> Namespace
+parseNamespace "jabber:client" = NsJabberClient
+parseNamespace "http://etherx.jabber.org/streams" = NsStreams
+parseNamespace "urn:ietf:params:xml:ns:xmpp-bind" = NsBind
+parseNamespace "urn:ietf:params:ns:xmpp-stanzas" = NsStanzas
+parseNamespace "urn:ietf:params:xml:ns:xmpp-session" = NsSession
+parseNamespace "http://jabber.org/protocol/disco#items" = NsDiscovery
+parseNamespace "jabber:iq:roster" = NsRoster
+parseNamespace s = NsOther s
+
+instance Show Namespace where
+  show NsJabberClient = "jabber:client"
+  show NsStreams = "http://etherx.jabber.org/streams"
+  show NsBind = "urn:ietf:params:xml:ns:xmpp-bind"
+  show NsStanzas = "urn:ietf:params:ns:xmpp-stanzas"
+  show NsSession = "urn:ietf:params:xml:ns:xmpp-session"
+  show NsDiscovery = "http://jabber.org/protocol/disco#items"
+  show NsRoster = "jabber:iq:roster"
+  show (NsOther s) = s
 
 {- -------------------------------------------------------------------------- -}
 

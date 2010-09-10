@@ -8,7 +8,7 @@ vpath %.hi $(OBJ)
 vpath %.hs $(SRC)
 
 jhabber:
-	ghc --make -isrc -hidir obj -odir obj -o bin/jhabber src/*.hs 
+	ghc --make -XDeriveDataTypeable -isrc -hidir obj -odir obj -o bin/jhabber src/*.hs 
 
 #: $(OBJS)
 #	$(HC) -o $@ $< 

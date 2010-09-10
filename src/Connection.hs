@@ -365,11 +365,12 @@ handleIq iq@(Xmpp.Iq rid to from action (xml:_)) state = do
 
 runIq :: Xmpp.IqAction ->  XmlElement -> ConnState -> ConnResultIO ([XmlElement], ConnState)
 runIq action xml state = do
-  let contentName = (elemNamespace xml, elemName xml)
+  let contentName = (Xmpp.parseNamespace (elemNamespace xml), elemName xml)
   case contentName of
-    (nsBind, "bind") -> handleBind action xml state
-    (nsSession, "session") -> handleSession action xml state
-    (nsDiscovery, "query") -> handleServiceDiscovery action xml state
+    (Xmpp.NsBind, "bind") -> handleBind action xml state
+    (Xmpp.NsSession, "session") -> handleSession action xml state
+    (Xmpp.NsDiscovery, "query") -> handleServiceDiscovery action xml state
+    (Xmpp.NsRoster, "query") -> handleRosterQuery action xml state
     _ -> throwError ServiceUnavailable
 
 {- -------------------------------------------------------------------------- -}
@@ -403,6 +404,20 @@ handleServiceDiscovery action content state = do
 --  let jid = stateJid state
 --  items <- liftRouterIO $ discoverInfo (router state) jid
   return $ ([], state)
+
+{- -------------------------------------------------------------------------- -}
+
+handleRosterQuery :: Xmpp.IqAction -> XmlElement -> ConnState -> ConnResultIO([XmlElement], ConnState)
+handleRosterQuery action content state = do
+  case action of
+    Xmpp.Get -> do
+      let Xmpp.JID uid _ _ = stateJid state
+      debugM $ "Fetching roster for " ++ uid
+      roster <- liftIO $ fetchRoster (database state) uid
+      let nsAttrib = XmlAttribute "" "xmlns" (show Xmpp.NsRoster)
+      let items = (Xmpp.formatRoster roster)
+      return ([XmlElement "" "query" [nsAttrib] items], state)
+    _ -> throwError ServiceUnavailable
 
 {- -------------------------------------------------------------------------- -}
 
