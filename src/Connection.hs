@@ -63,6 +63,7 @@ data ConnMsg = StreamStartRx
              | ConnectionLost
              | ProtocolError
              | Close
+             | SendMessage JID InstantMessage
 
 type ConnMsgQ = TChan ConnMsg
 
@@ -332,6 +333,27 @@ handleInboundStanza iq@(Xmpp.Iq _ _ _ _ _) state = do
       liftIO $ xmppSend (stateSocket state) response
       return ([Ok], state')
 
+handleInboundStanza message@(Xmpp.Message to _ _ _ _ _ _ _) state = do
+    case to of
+      Just dst ->
+        let src = maybe (stateJid state) (id) (msgFrom msg)
+        routeMessage (router state) src dst $ translateMsg msg
+      _ -> ()
+    return ([Ok], state)
+  where
+    translateMsg :: Xmpp.Stanza -> InstantMessage
+    translateMsg xml@(Xmpp.Message _ _ xmppType lang subject thread body _) =
+      MkMsg {  msgType = xmppType,
+               msgLang = lang,
+               msgSubject = map repack subject
+               msgThread = thread
+               msgBody = map repack body }
+
+    repack :: Xmpp.TaggedText -> TaggedText
+    repack (lang, text) = (maybe Nothing (\s -> Just $ pack s) lang, pack text)
+
+handleInboundStanza _ state = return ([Ok], state)
+
 {- -------------------------------------------------------------------------- -}
 
 uid :: ConnState -> String
@@ -418,6 +440,12 @@ handleRosterQuery action content state = do
       let items = (Xmpp.formatRoster roster)
       return ([XmlElement "" "query" [nsAttrib] items], state)
     _ -> throwError ServiceUnavailable
+
+{- -------------------------------------------------------------------------- -}
+
+routeMessage :: JID -> JID -> Router -> Xmpp.Stanza -> IO ()
+routeMessage to from rtr msg = do
+  routeMessage rtr to from $ Message
 
 {- -------------------------------------------------------------------------- -}
 

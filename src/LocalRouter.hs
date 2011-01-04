@@ -1,6 +1,7 @@
 module LocalRouter (Router,
                     Failure(..),
                     ResultIO,
+                    InstantMessage(..),
                     newRouter,
                     stopRouter,
                     bindResource,
@@ -11,6 +12,7 @@ module LocalRouter (Router,
 import Control.Monad.Error
 import Prelude hiding (catch)
 import Data.List
+import Data.Text(Text, pack)
 import qualified Data.Map as Map
 import Control.Monad
 import Control.Concurrent (ThreadId, forkIO, myThreadId, threadDelay)
@@ -18,7 +20,7 @@ import Control.Concurrent.STM
 import qualified Control.Exception as E
 import System.Log.Logger
 import System.Timeout
-import Xmpp(JID(..))
+import Xmpp(JID(..), MessageType)
 import {-# SOURCE #-} Connection
 
 import RoutingTable
@@ -34,6 +36,17 @@ instance Error Failure where
 
 type NamedItem = (JID, String)
 
+{-| A string with an optional language tag -}
+type TaggedText = (Maybe Text, Text)
+
+data InstantMessage = MkMsg {
+  msgType :: Xmpp.MessageType,
+  msgLang :: Maybe String,
+  msgSubject :: [TaggedText],
+  msgThread :: Maybe String,
+  msgBody :: [TaggedText]
+}
+
 data Reply = RpyBound JID
            | RpyError Failure
            | RpyItems [NamedItem]
@@ -46,6 +59,7 @@ data Message = MsgDummy
              | MsgBind Connection JID
              | MsgActivateSession JID
              | MsgQuery JID String
+             | MsgRouteMessage JID JID InstantMessage
 
 type Result a = Either Failure a
 type ResultIO a = ErrorT Failure IO a
@@ -106,6 +120,13 @@ crashRouter (MkRouter workerPool) = post workerPool MsgCrash
 
 {- -------------------------------------------------------------------------- -}
 
+routeMessage :: Router -> JID -> JID -> InstantMessage -> ResultIO ()
+routeMessage (MkRouter workerPool) from to message =
+  liftIO $ call workerPool (MsgRouteMessage from to message)
+  return ()
+
+{- -------------------------------------------------------------------------- -}
+
 -- Binds a connection to a jabber ID in the routing table
 handleMsg :: Message -> RoutingTableVar -> IO ((Maybe Reply), RoutingTableVar)
 handleMsg (MsgBind conn jid) tableVar = do
@@ -130,6 +151,13 @@ handleMsg (MsgActivateSession jid) tableVar = do
         return RpyOK
       Nothing -> return $ RpyError NotFound
   return ((Just reply), tableVar)
+
+handleMsg (MsgRouteMessage from to msg) tableVar = do
+  maybeDst <- atomically $ do table <- readTVar tableVar
+                              lookupResource to table
+  case maybeDst of
+    Just (_,res) -> (resConn res)
+
 
 -- Handles a discovery query from a client. Only ever returns an empty set of
 -- name/value pairs

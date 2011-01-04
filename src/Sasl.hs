@@ -6,8 +6,7 @@ module Sasl ( AuthInfo(None),
               checkResponse,
               checkCredentials,
               getUid,
-              isAuthenticated,
-              nsSasl ) where
+              isAuthenticated) where
 
 import Control.Monad.Error
 import qualified Data.ByteString as BS
@@ -77,9 +76,6 @@ instance Binary MD5Digest where
     p <- get
     return $ MD5Digest p
 -}
-
-nsSasl :: String
-nsSasl = "urn:ietf:params:xml:ns:xmpp-sasl"
 
 isAuthenticated :: AuthInfo -> Bool
 isAuthenticated (Digest _ _ _ _ _ _ _ _ _ state) =
