@@ -53,9 +53,16 @@ newResource jid conn = Resource {resId = jid, resConn = conn, resActive = False 
 
 lookupResource :: JID -> RoutingTable -> Maybe (Registration, Resource)
 lookupResource jid@(JID node _ rid) table = do
-  reg <- lookupRegistration jid table
-  res <- Map.lookup rid reg
-  return (reg, res)
+    reg <- lookupRegistration jid table
+    res <- getResource rid reg
+    return (reg, res)
+  where
+    getResource :: String -> Registration -> Maybe Resource
+    getResource "" r = Just $ second $ Map.elemAt 0 r
+    getResource id r = Map.lookup id r
+
+    second (_,x) = x
+
 
 addResource :: Resource -> Registration -> Registration
 addResource res reg =

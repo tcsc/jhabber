@@ -8,7 +8,8 @@ module Xml ( XmlElement(..),
              getChild,
              getChildText,
              getNamedChildren,
-             getNamedChild ) where
+             getNamedChild,
+             selectChildren ) where
 
 
 import Data.List
@@ -42,6 +43,9 @@ getChild e@(XmlElement _ _ _ children) n =
     Just $ children !! n
   else
     Nothing
+
+selectChildren :: (XmlElement -> Bool) -> XmlElement -> [XmlElement]
+selectChildren f xml = filter f (children xml)
 
 getNamedChildren :: String -> String -> XmlElement -> [XmlElement]
 getNamedChildren ns n (XmlElement _ _ _ cs) =  filter (checkName ns n) cs

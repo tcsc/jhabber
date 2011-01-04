@@ -6,6 +6,7 @@ module Xmpp ( Namespace(..),
               Failure(..),
               RosterEntry(..),
               RosterGroup(..),
+              MessageType(..),
               toXml,
               format,
               fromXml,
@@ -82,6 +83,19 @@ data IqTarget = None
               | ErrorCode Failure
               deriving (Show, Eq)
 
+data MessageType = MsgTypeUnknown
+                 | MsgTypeChat
+                 | MsgTypeError
+                 | MsgTypeGroupChat
+                 | MsgTypeHeadline
+                 | MsgTypeNormal
+                 deriving (Show, Eq)
+
+-- | A piece of text (optionally) tagged with a language identifier. Used to
+--   hold text for the message subject and body tags
+data TaggedText = Text (Maybe String) !String
+                deriving (Show, Eq)
+
 data Stanza = RxStreamOpen String Float
             | TxStreamOpen String Integer
             | Features [XmlElement]
@@ -95,15 +109,25 @@ data Stanza = RxStreamOpen String Float
                    iqFrom :: !String,
                    iqAction :: !IqAction,
                    iqContent :: [XmlElement] }
+            | Message { msgTo :: Maybe JID,
+                        msgFrom :: Maybe JID,
+                        msgType :: MessageType,
+                        msgLang :: Maybe String,
+                        msgSubject :: [TaggedText],
+                        msgThread :: Maybe String,
+                        msgBody :: [TaggedText],
+                        msgExtra :: [XmlElement] }
             deriving (Show, Eq)
 
 data Namespace = NsJabberClient
+               | NsSasl
                | NsStreams
                | NsBind
                | NsStanzas
                | NsSession
                | NsDiscovery
                | NsRoster
+               | NsXhtml
                | NsOther !String
 
 namespaces :: [XmlAttribute]
@@ -132,10 +156,10 @@ toXml :: Stanza -> XmlElement
 toXml (Features fs) = XmlElement "stream" "features" [] fs
 
 toXml (AuthChallenge c) = XmlElement "" "challenge"
-  [XmlAttribute "" "xmlns" nsSasl]
+  [XmlAttribute "" "xmlns" (show NsSasl)]
   [XmlText $ (encode . unpack . fromString) c]
 
-toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" nsSasl] []
+toXml AuthSuccess = XmlElement "" "success" [XmlAttribute "" "xmlns" (show NsSasl)] []
 
 toXml (Iq rid to from action content) = XmlElement "" "iq" attrs content
   where
@@ -143,24 +167,52 @@ toXml (Iq rid to from action content) = XmlElement "" "iq" attrs content
     attrTo = if to == "" then [] else [XmlAttribute "" "to" to]
     attrFrom = if from == "" then [] else [XmlAttribute "" "to" from]
 
+toXml (Message to from mType lang ss tid bs extras) = XmlElement "" "message" attrs children
+  where subjects = map (textToXml "subject") ss
+        bodies = map (textToXml "body") bs
+        thread = maybe [] (\t -> [XmlElement "" "thread" [] [XmlText t]]) tid
+        children = concat $ subjects : bodies : thread : extras : []
+        attrs = concat $ [XmlAttribute "" "type" (show mType)] :
+                         maybe [] (\j -> [XmlAttribute "" "to" (show j)]) to :
+                         maybe [] (\j -> [XmlAttribute "" "from" (show j)]) from :
+                         maybe [] (\l -> [XmlAttribute "xml" "lang" l]) lang :
+                         []
+
+{- -------------------------------------------------------------------------- -}
+
 toXml (Failure n f) = XmlElement "" "failure" [namespace] [f]
   where namespace = XmlAttribute "" "xmlns" n
 
 {- -------------------------------------------------------------------------- -}
 
+textToXml :: String -> TaggedText -> XmlElement
+textToXml n (Text lang text) =
+    let attrs = maybe [] (\l -> [XmlAttribute "xml" "lang" l]) lang
+        body = XmlText text
+    in  XmlElement "" n attrs [body]
+
+{- -------------------------------------------------------------------------- -}
+
 -- | Parses an XML stanza into a (possible) XMPP message
 fromXml :: XmlElement -> Maybe Stanza
-fromXml element@(XmlElement nsStreams "stream" attribs _) = do
+fromXml xml@(XmlElement ns n _ _) =
+  let fullName = (parseNamespace ns, n) in
+  fromXmlElement fullName xml
+
+{- -------------------------------------------------------------------------- -}
+
+fromXmlElement :: (Namespace, String) -> XmlElement -> Maybe Stanza
+fromXmlElement (NsStreams, "stream") element = do
   to <- getAttribute (show NsJabberClient) "to" element
   verText <- getAttribute (show NsJabberClient) "version" element
   ver <- readM verText
   return $ RxStreamOpen to ver
 
-fromXml element@(XmlElement nsSasl "auth" attribs children) = do
-  m <- getAttribute nsSasl "mechanism" element
+fromXmlElement (NsSasl, "auth") element = do
+  m <- getAttr NsSasl "mechanism" element
   return $ AuthMechanism m
 
-fromXml element@(XmlElement nsSasl "response" attribs children) = do
+fromXmlElement (NsSasl, "response") element = do
   let mchild = getChild element 0
   case mchild of
     Just (XmlText s) -> do
@@ -168,19 +220,55 @@ fromXml element@(XmlElement nsSasl "response" attribs children) = do
       return $ AuthResponse (toString $ pack bytes)
     Nothing -> return $ AuthResponse ""
 
-fromXml xml@(XmlElement nsJabber "iq" _ children) = do
-  let to = maybe "" id $ getAttribute nsJabber "to" xml
-  let from = maybe "" id $ getAttribute nsJabber "from" xml
-  action <- getAttribute nsJabber "type" xml >>= parseIqType
-  id <- getAttribute nsJabber "id" xml
+fromXmlElement (NsJabberClient, "iq") xml = do
+  let to = maybe "" id $ getXmppAttr "to" xml
+  let from = maybe "" id $ getXmppAttr "from" xml
+  action <- getXmppAttr "type" xml >>= parseIqType
+  id <- getXmppAttr "id" xml
   content <- getChild xml 0
   return $ Iq { iqRequestId = id,
                 iqTo = to,
                 iqFrom = from,
                 iqAction = action,
-                iqContent = children }
+                iqContent = (children xml) }
 
-fromXml element = Nothing
+fromXmlElement (NsJabberClient, "message") xml = do
+  let to = getXmppAttr "to" xml >>= parseJid
+  let from = getXmppAttr "from" xml >>= parseJid
+  let mType = maybe MsgTypeUnknown (id) (getXmppAttr "type" xml >>= readMessageType)
+  let subjects = msgSubjectList xml
+  let bodies = msgBodyList xml
+  let everythingElse = selectChildren ( \(XmlElement _ n _ _) -> not (n == "body" || n == "subject")) xml
+  return $ Message { msgTo = to,
+                     msgFrom = from,
+                     msgType = mType,
+                     msgLang = Nothing,
+                     msgSubject = subjects,
+                     msgThread = Nothing,
+                     msgBody = bodies,
+                     msgExtra = everythingElse }
+
+fromXmlElement _ _ = Nothing
+
+{- -------------------------------------------------------------------------- -}
+
+msgSubjectList :: XmlElement -> [TaggedText]
+msgSubjectList xml = map taggedText subjects
+  where subjects = getNamedChildren (show NsJabberClient) "subject" xml
+
+{- -------------------------------------------------------------------------- -}
+
+msgBodyList :: XmlElement -> [TaggedText]
+msgBodyList xml = map taggedText bodies
+  where bodies = getNamedChildren (show NsJabberClient) "body" xml
+
+{- -------------------------------------------------------------------------- -}
+
+taggedText :: XmlElement -> TaggedText
+taggedText xml =
+  let lang = getAttribute "xml" "lang" xml
+      text = maybe "" (id) $ getChildText xml
+  in Text lang text
 
 {- -------------------------------------------------------------------------- -}
 
@@ -209,6 +297,7 @@ iqTargetFromXml xml@(XmlElement nsDiscovery "query" _ _) = Just ItemQuery
 iqTargetFromXml _ = Nothing
 
 {- -------------------------------------------------------------------------- -}
+
 formatRoster :: [RosterEntry] -> [XmlElement]
 formatRoster r = map formatEntry r
   where
@@ -263,30 +352,50 @@ parseIqType s = case s of
 
 {- -------------------------------------------------------------------------- -}
 
+readMessageType :: String -> Maybe MessageType
+readMessageType s = case s of
+  "chat" -> Just MsgTypeChat
+  "error" -> Just MsgTypeError
+  "roupchat" -> Just MsgTypeGroupChat
+  "headline" -> Just MsgTypeHeadline
+  "normal" -> Just MsgTypeNormal
+  _ -> Nothing
+
+{- -------------------------------------------------------------------------- -}
+
 newAuthFailure :: String -> Stanza
-newAuthFailure f = Failure (nsSasl) child
+newAuthFailure f = Failure (show NsSasl) child
  where child = newElement f
+
+getAttr :: Namespace -> String -> XmlElement -> Maybe String
+getAttr ns n xml = getAttribute (show ns) n xml
+
+getXmppAttr = getAttr NsJabberClient
 
 {- -------------------------------------------------------------------------- -}
 
 parseNamespace :: String -> Namespace
 parseNamespace "jabber:client" = NsJabberClient
+parseNamespace "urn:ietf:params:xml:ns:xmpp-sasl" = NsSasl
 parseNamespace "http://etherx.jabber.org/streams" = NsStreams
 parseNamespace "urn:ietf:params:xml:ns:xmpp-bind" = NsBind
 parseNamespace "urn:ietf:params:ns:xmpp-stanzas" = NsStanzas
 parseNamespace "urn:ietf:params:xml:ns:xmpp-session" = NsSession
 parseNamespace "http://jabber.org/protocol/disco#items" = NsDiscovery
 parseNamespace "jabber:iq:roster" = NsRoster
+parseNamespace "http://www.w3.org/1999/xhtml" = NsXhtml
 parseNamespace s = NsOther s
 
 instance Show Namespace where
   show NsJabberClient = "jabber:client"
+  show NsSasl = "urn:ietf:params:xml:ns:xmpp-sasl"
   show NsStreams = "http://etherx.jabber.org/streams"
   show NsBind = "urn:ietf:params:xml:ns:xmpp-bind"
   show NsStanzas = "urn:ietf:params:ns:xmpp-stanzas"
   show NsSession = "urn:ietf:params:xml:ns:xmpp-session"
   show NsDiscovery = "http://jabber.org/protocol/disco#items"
   show NsRoster = "jabber:iq:roster"
+  show NsXhtml = "http://www.w3.org/1999/xhtml"
   show (NsOther s) = s
 
 {- -------------------------------------------------------------------------- -}
